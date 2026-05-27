@@ -3,8 +3,14 @@ from src.memory.trade_repository import (
     close_trade
 )
 
-from src.portfolio.risk_manager import RiskManager
-from src.portfolio.portfolio_manager import PortfolioManager
+from src.portfolio.risk_manager import (
+    RiskManager
+)
+
+from src.portfolio.portfolio_manager import (
+    PortfolioManager
+)
+
 from src.utils.cost_calculator import (
     calculate_trade_costs
 )
@@ -16,7 +22,9 @@ class PaperEngine:
 
         self.active_trades = {}
 
-        self.portfolio = PortfolioManager()
+        self.portfolio = (
+            PortfolioManager()
+        )
 
     def open_position(
         self,
@@ -26,6 +34,22 @@ class PaperEngine:
         entry_reason,
         current_stop=None
     ):
+
+        position_value = (
+            entry_price
+            *
+            quantity
+        )
+
+        if not (
+            self.portfolio
+            .reserve_capital(
+                position_value
+            )
+        ):
+            raise Exception(
+                "Insufficient portfolio capital"
+            )
 
         trade = open_trade(
             symbol=symbol,
@@ -38,7 +62,7 @@ class PaperEngine:
         self.active_trades[
             trade.id
         ] = RiskManager(
-            entry_price * quantity
+            position_value
         )
 
         return trade
@@ -76,19 +100,27 @@ class PaperEngine:
         )
 
         buy_value = (
-            trade.entry_price *
+            trade.entry_price
+            *
             trade.quantity
         )
 
         sell_value = (
-            trade.exit_price *
+            trade.exit_price
+            *
             trade.quantity
         )
 
-        costs = calculate_trade_costs(
-            buy_value,
-            sell_value,
-            trade.pnl
+        self.portfolio.release_capital(
+            buy_value
+        )
+
+        costs = (
+            calculate_trade_costs(
+                buy_value,
+                sell_value,
+                trade.pnl
+            )
         )
 
         portfolio_result = (
@@ -98,7 +130,11 @@ class PaperEngine:
             )
         )
 
-        if trade_id in self.active_trades:
+        if (
+            trade_id
+            in
+            self.active_trades
+        ):
             del self.active_trades[
                 trade_id
             ]

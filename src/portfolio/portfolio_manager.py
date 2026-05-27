@@ -15,6 +15,7 @@ class PortfolioManager:
         self.current_capital = STARTING_CAPITAL
         self.base_capital = BASE_CAPITAL
         self.booked_profit = 0
+        self.reserved_capital = 0
 
     def apply_trade_result(self, pnl):
 
@@ -92,4 +93,38 @@ class PortfolioManager:
         return (
             self.current_capital
             <= KILL_SWITCH
+        )
+    def available_capital(self):
+
+        return (
+            self.current_capital
+            -
+            self.reserved_capital
+        )
+    def reserve_capital(
+        self,
+        amount
+    ):
+
+        if (
+            amount
+            >
+            self.available_capital()
+        ):
+            return False
+
+        self.reserved_capital += amount
+
+        return True
+    
+    def release_capital(
+    self,
+    amount
+    ):
+
+        self.reserved_capital = max(
+            0,
+            self.reserved_capital
+            -
+            amount
         )
