@@ -8,7 +8,7 @@ from src.memory.trade_repository import get_closed_trades
 AI_COST_FILE = "data/ai_costs.json"
 MAX_CALLS_PER_DAY = 50
 MAX_RETRIES = 2
-TIMEOUT_SECONDS = 10
+TIMEOUT_SECONDS = 15
 MAX_FAILURES_BEFORE_CIRCUIT_BREAK = 3
 API_KEY = os.getenv(
     "GEMINI_API_KEY"
@@ -111,7 +111,6 @@ def call_gemini(prompt):
                 client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=prompt,
-                    timeout=TIMEOUT_SECONDS
                 )
             )
 

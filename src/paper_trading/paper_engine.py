@@ -59,10 +59,23 @@ class PaperEngine:
             current_stop=current_stop
         )
 
+        atr = (
+        abs(
+            entry_price
+            -
+            current_stop
+        )
+        /
+        RiskManager.ATR_MULTIPLIER
+            if current_stop
+            else 1
+        )
+
         self.active_trades[
             trade.id
         ] = RiskManager(
-            position_value
+            entry_price,
+            atr
         )
 
         return trade
