@@ -110,7 +110,8 @@ def call_gemini(prompt):
             response = (
                 client.models.generate_content(
                     model="gemini-2.5-flash",
-                    contents=prompt
+                    contents=prompt,
+                    timeout=TIMEOUT_SECONDS
                 )
             )
 
@@ -271,16 +272,43 @@ Rules:
 
 
 def get_cost_summary():
+
     costs = load_costs()
     costs = reset_if_new_day(costs)
+
+    today_calls = costs.get(
+        "today_calls",
+        0
+    )
+
+    month_calls = costs.get(
+        "month_calls",
+        0
+    )
+
+    # Approx Gemini Flash pricing
+    estimated_cost_per_call_inr = 0.20
+
     return {
-        "today_calls": costs.get("today_calls", 0),
-        "month_calls": costs.get("month_calls", 0),
+        "today_calls": today_calls,
+        "month_calls": month_calls,
+        "today_inr": round(
+            today_calls
+            *
+            estimated_cost_per_call_inr,
+            2
+        ),
+        "month_inr": round(
+            month_calls
+            *
+            estimated_cost_per_call_inr,
+            2
+        ),
         "circuit_broken": _circuit_broken,
         "calls_remaining": max(
             0,
             MAX_CALLS_PER_DAY
             -
-            costs.get("today_calls", 0)
+            today_calls
         )
     }
