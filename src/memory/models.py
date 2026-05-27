@@ -52,11 +52,21 @@ class Trade(Base):
 
     entry_time = Column(
         DateTime,
-        nullable=True
+        default=datetime.utcnow
     )
 
     exit_time = Column(
         DateTime,
+        nullable=True
+    )
+
+    current_stop = Column(
+        Float,
+        nullable=True
+    )
+
+    highest_price = Column(
+        Float,
         nullable=True
     )
 
