@@ -23,14 +23,16 @@ class PaperEngine:
         symbol,
         entry_price,
         quantity,
-        entry_reason
+        entry_reason,
+        current_stop=None
     ):
 
         trade = open_trade(
             symbol=symbol,
             entry_price=entry_price,
             quantity=quantity,
-            entry_reason=entry_reason
+            entry_reason=entry_reason,
+            current_stop=current_stop
         )
 
         self.active_trades[
