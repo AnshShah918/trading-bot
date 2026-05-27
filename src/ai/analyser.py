@@ -10,9 +10,6 @@ MAX_CALLS_PER_DAY = 50
 MAX_RETRIES = 2
 TIMEOUT_SECONDS = 15
 MAX_FAILURES_BEFORE_CIRCUIT_BREAK = 3
-API_KEY = os.getenv(
-    "GEMINI_API_KEY"
-)
 
 _consecutive_failures = 0
 _circuit_broken = False
@@ -97,14 +94,19 @@ def call_gemini(prompt):
     if _circuit_broken:
         return None
 
-    for attempt in range(
-        MAX_RETRIES + 1
-    ):
+    # Read key here — after load_dotenv() has run
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        print("GEMINI_API_KEY not set. Skipping AI.")
+        return None
+
+    for attempt in range(MAX_RETRIES + 1):
 
         try:
 
             client = genai.Client(
-                api_key=API_KEY
+                api_key=api_key
             )
 
             response = (
@@ -143,7 +145,6 @@ def call_gemini(prompt):
                 return None
 
             if attempt < MAX_RETRIES:
-
                 time.sleep(2)
 
     return None
@@ -155,12 +156,10 @@ def analyse_setups(setups):
     if not setups:
         return setups
 
-    # GUARDRAIL — circuit broken
     if _circuit_broken:
         print("AI circuit broken. Skipping.")
         return setups
 
-    # GUARDRAIL — daily call limit
     calls_today = get_call_count()
 
     if calls_today >= MAX_CALLS_PER_DAY:
@@ -210,13 +209,11 @@ Rules:
 
     raw = call_gemini(prompt)
 
-    # GUARDRAIL — AI unavailable, return setups as-is
     if raw is None:
         return setups
 
     track_call()
 
-    # GUARDRAIL — parse failure, return setups as-is
     try:
         cleaned = raw.strip()
 
@@ -253,8 +250,6 @@ Rules:
                 rec.get("reasoning", "")
             )
         else:
-            # AI skipped it — still include
-            # but flagged so user knows
             setup["ai_confidence"] = None
             setup["ai_reasoning"] = None
 
@@ -275,39 +270,15 @@ def get_cost_summary():
     costs = load_costs()
     costs = reset_if_new_day(costs)
 
-    today_calls = costs.get(
-        "today_calls",
-        0
-    )
-
-    month_calls = costs.get(
-        "month_calls",
-        0
-    )
-
-    # Approx Gemini Flash pricing
-    estimated_cost_per_call_inr = 0.20
+    today_calls = costs.get("today_calls", 0)
+    month_calls = costs.get("month_calls", 0)
 
     return {
         "today_calls": today_calls,
         "month_calls": month_calls,
-        "today_inr": round(
-            today_calls
-            *
-            estimated_cost_per_call_inr,
-            2
-        ),
-        "month_inr": round(
-            month_calls
-            *
-            estimated_cost_per_call_inr,
-            2
-        ),
         "circuit_broken": _circuit_broken,
         "calls_remaining": max(
             0,
-            MAX_CALLS_PER_DAY
-            -
-            today_calls
+            MAX_CALLS_PER_DAY - today_calls
         )
     }

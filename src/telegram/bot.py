@@ -55,6 +55,7 @@ async def handle_decision(
                 f"rsi={setup['rsi']} "
                 f"ai={setup.get('ai_confidence', 'N/A')}"
             ),
+            atr=setup["atr"],
             current_stop=setup["suggested_stop"]
         )
 
@@ -162,7 +163,6 @@ async def run_scan(application, scan_type="morning"):
         reverse=True
     )
 
-    # Closing scan — exit suggestions only, no new entries
     if scan_type == "closing":
         await send_message(
             bot,
@@ -170,7 +170,6 @@ async def run_scan(application, scan_type="morning"):
         )
         return
 
-    # Filter: STRONG only, not already sent today
     strong = [
         r for r in results
         if r["tier"] == "STRONG"
@@ -184,7 +183,6 @@ async def run_scan(application, scan_type="morning"):
         )
         return
 
-    # AI analysis
     await send_message(
         bot,
         f"🤖 AI analysing {len(strong)} setup(s)..."
@@ -205,7 +203,7 @@ async def run_scan(application, scan_type="morning"):
         bot,
         f"{label} scan done.\n"
         f"{len(analysed)} setup(s) passed AI review.\n"
-        f"AI cost today: ₹{costs['today_inr']}"
+        f"AI calls today: {costs['today_calls']}"
     )
 
     for setup in analysed:
@@ -241,8 +239,8 @@ async def run_eod_summary(bot):
         f"Closed today:   {len(closed_today)}\n"
         f"Today P&L:      ₹{total_pnl:,.0f}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"AI cost today:  ₹{costs['today_inr']}\n"
-        f"AI cost month:  ₹{costs['month_inr']}\n"
+        f"AI calls today: {costs['today_calls']}\n"
+        f"AI calls month: {costs['month_calls']}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Bot shutting down. See you tomorrow 🌙"
     )
@@ -250,38 +248,34 @@ async def run_eod_summary(bot):
 
 async def scheduler(application):
     global sent_today
+    fired = set()
 
     while True:
         now = datetime.now()
-        hour = now.hour
-        minute = now.minute
+        key = now.strftime("%H:%M")
 
-        # Reset daily dedup at midnight
-        if hour == 0 and minute == 0:
+        if key == "00:00" and "reset" not in fired:
             sent_today.clear()
+            fired.clear()
+            fired.add("reset")
 
-        # Morning scan 8:45 AM
-        if hour == 8 and minute == 45:
+        if key == "08:45" and "morning" not in fired:
+            fired.add("morning")
             await run_scan(application, "morning")
-            await asyncio.sleep(60)
 
-        # Mid-day scan 12:00 PM
-        elif hour == 12 and minute == 0:
+        elif key == "12:00" and "midday" not in fired:
+            fired.add("midday")
             await run_scan(application, "midday")
-            await asyncio.sleep(60)
 
-        # Closing scan 3:00 PM
-        elif hour == 15 and minute == 0:
+        elif key == "15:00" and "closing" not in fired:
+            fired.add("closing")
             await run_scan(application, "closing")
-            await asyncio.sleep(60)
 
-        # EOD summary 3:30 PM then shutdown
-        elif hour == 15 and minute == 30:
+        elif key == "15:30" and "eod" not in fired:
+            fired.add("eod")
             await run_eod_summary(application.bot)
-            await asyncio.sleep(60)
 
-        else:
-            await asyncio.sleep(30)
+        await asyncio.sleep(30)
 
 
 async def post_init(application: Application):
@@ -293,7 +287,6 @@ async def post_init(application: Application):
         run_monitor(application.bot, token_map)
     )
 
-    # Run morning scan immediately on startup
     await run_scan(application, "morning")
 
 
