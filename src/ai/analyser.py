@@ -10,6 +10,9 @@ MAX_CALLS_PER_DAY = 50
 MAX_RETRIES = 2
 TIMEOUT_SECONDS = 10
 MAX_FAILURES_BEFORE_CIRCUIT_BREAK = 3
+API_KEY = os.getenv(
+    "GEMINI_API_KEY"
+)
 
 _consecutive_failures = 0
 _circuit_broken = False
