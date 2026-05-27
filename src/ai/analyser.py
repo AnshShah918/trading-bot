@@ -90,38 +90,41 @@ def build_trade_history():
 
 
 def call_gemini(prompt):
-    global _consecutive_failures, _circuit_broken
+
+    global _consecutive_failures
+    global _circuit_broken
 
     if _circuit_broken:
         return None
 
-    client = genai.Client(
-        api_key=API_KEY
-    )
+    for attempt in range(
+        MAX_RETRIES + 1
+    ):
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
-
-    text = response.text
-    for attempt in range(MAX_RETRIES + 1):
         try:
-            response = model.generate_content(
-                prompt,
-                request_options={
-                    "timeout": TIMEOUT_SECONDS
-                }
+
+            client = genai.Client(
+                api_key=API_KEY
+            )
+
+            response = (
+                client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt
+                )
             )
 
             _consecutive_failures = 0
+
             return response.text
 
         except Exception as e:
+
             _consecutive_failures += 1
+
             print(
-                f"Gemini attempt {attempt + 1} "
-                f"failed: {e}"
+                f"Gemini attempt "
+                f"{attempt + 1} failed: {e}"
             )
 
             if (
@@ -129,14 +132,18 @@ def call_gemini(prompt):
                 >=
                 MAX_FAILURES_BEFORE_CIRCUIT_BREAK
             ):
+
                 _circuit_broken = True
+
                 print(
                     "Circuit breaker triggered. "
                     "AI disabled for this session."
                 )
+
                 return None
 
             if attempt < MAX_RETRIES:
+
                 time.sleep(2)
 
     return None
