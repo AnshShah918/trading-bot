@@ -1,3 +1,5 @@
+import os
+import json
 from src.config.settings import (
     STARTING_CAPITAL,
     BASE_CAPITAL,
@@ -8,184 +10,101 @@ from src.config.settings import (
     MIN_PROFIT_BOOK_PERCENT
 )
 
-from src.memory.trade_repository import (
-    get_open_trades
-)
+STATE_FILE = "data/portfolio_state.json"
 
 
 class PortfolioManager:
 
     def __init__(self):
+        state = self._load_state()
+        self.current_capital = state["current_capital"]
+        self.base_capital = state["base_capital"]
+        self.booked_profit = state["booked_profit"]
 
-        self.current_capital = (
-            STARTING_CAPITAL
-        )
+    def _load_state(self):
+        try:
+            with open(STATE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {
+                "current_capital": STARTING_CAPITAL,
+                "base_capital": BASE_CAPITAL,
+                "booked_profit": 0
+            }
 
-        self.base_capital = (
-            BASE_CAPITAL
-        )
+    def _save_state(self):
+        os.makedirs("data", exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump({
+                "current_capital": self.current_capital,
+                "base_capital": self.base_capital,
+                "booked_profit": self.booked_profit
+            }, f)
 
-        self.booked_profit = 0
-
-        self.reserved_capital = 0
-
-        self.rebuild_state()
-
-    def rebuild_state(self):
-
-        open_trades = (
-            get_open_trades()
-        )
-
-        deployed_capital = sum(
-            t.entry_price
-            *
-            t.quantity
-            for t in open_trades
-        )
-
-        self.reserved_capital = (
-            deployed_capital
-        )
-
-    def available_capital(self):
-
-        return (
-            self.current_capital
-            -
-            self.reserved_capital
-        )
-
-    def reserve_capital(
-        self,
-        amount
-    ):
-
-        if (
-            amount
-            >
-            self.available_capital()
-        ):
-            return False
-
-        self.reserved_capital += amount
-
-        return True
-
-    def release_capital(
-        self,
-        amount
-    ):
-
-        self.reserved_capital = max(
-            0,
-            self.reserved_capital
-            -
-            amount
-        )
-
-    def apply_trade_result(
-        self,
-        pnl
-    ):
+    def apply_trade_result(self, pnl):
 
         self.current_capital += pnl
 
         if pnl > 0:
 
             profit_percent = (
-                pnl
-                /
-                self.base_capital
+                pnl / self.base_capital
             )
 
             eligible_for_booking = (
-                pnl
-                >=
-                MIN_PROFIT_BOOK_AMOUNT
+                pnl >= MIN_PROFIT_BOOK_AMOUNT
                 and
-                profit_percent
-                >=
+                profit_percent >=
                 MIN_PROFIT_BOOK_PERCENT
             )
 
-            # Recovery Mode
-            if (
-                self.current_capital
-                <
-                self.base_capital
-            ):
-
+            if self.current_capital < self.base_capital:
+                self._save_state()
                 return {
                     "capital": self.current_capital,
                     "base_capital": self.base_capital,
                     "booked_profit": self.booked_profit,
-                    "reserved_capital": self.reserved_capital,
-                    "available_capital": (
-                        self.available_capital()
-                    ),
                     "mode": "recovery"
                 }
 
-            # Meaningful Profit Booking
             if eligible_for_booking:
 
                 profit_to_book = (
-                    pnl
-                    *
-                    PROFIT_BOOK_PERCENT
+                    pnl * PROFIT_BOOK_PERCENT
                 )
 
                 profit_to_compound = (
-                    pnl
-                    *
-                    COMPOUND_PERCENT
+                    pnl * COMPOUND_PERCENT
                 )
 
-                self.booked_profit += (
-                    profit_to_book
-                )
-
-                self.current_capital -= (
-                    profit_to_book
-                )
-
-                self.base_capital += (
-                    profit_to_compound
-                )
+                self.booked_profit += profit_to_book
+                self.current_capital -= profit_to_book
+                self.base_capital += profit_to_compound
 
                 mode = "normal"
 
             else:
-
                 mode = "small_profit"
+
+            self._save_state()
 
             return {
                 "capital": self.current_capital,
                 "base_capital": self.base_capital,
                 "booked_profit": self.booked_profit,
-                "reserved_capital": self.reserved_capital,
-                "available_capital": (
-                    self.available_capital()
-                ),
                 "mode": mode
             }
+
+        self._save_state()
 
         return {
             "capital": self.current_capital,
             "base_capital": self.base_capital,
             "booked_profit": self.booked_profit,
-            "reserved_capital": self.reserved_capital,
-            "available_capital": (
-                self.available_capital()
-            ),
             "mode": "loss"
         }
 
     def portfolio_paused(self):
-
         return (
-            self.current_capital
-            <=
-            KILL_SWITCH
+            self.current_capital <= KILL_SWITCH
         )

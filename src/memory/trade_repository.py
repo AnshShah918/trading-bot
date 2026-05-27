@@ -90,17 +90,17 @@ def get_open_trades():
     return trades
 
 
-def get_all_trades():
-    db = get_db()
-    trades = db.query(Trade).all()
-    db.close()
-    return trades
-
-
 def get_closed_trades():
     db = get_db()
     trades = db.query(Trade).filter(
         Trade.status == "closed"
     ).all()
+    db.close()
+    return trades
+
+
+def get_all_trades():
+    db = get_db()
+    trades = db.query(Trade).all()
     db.close()
     return trades

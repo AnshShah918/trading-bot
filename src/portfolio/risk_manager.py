@@ -17,6 +17,14 @@ class RiskManager:
             (atr * self.ATR_MULTIPLIER)
         )
 
+    def restore(
+        self,
+        highest_price,
+        current_stop
+    ):
+        self.highest_price = highest_price
+        self.trailing_stop = current_stop
+
     def update(
         self,
         current_price,
@@ -50,13 +58,15 @@ class RiskManager:
         )
 
         profit_rs = (
-            (current_price - self.entry_price)
+            current_price - self.entry_price
         )
 
         return {
             "current_price": current_price,
             "highest_price": self.highest_price,
-            "trailing_stop": round(self.trailing_stop, 2),
+            "trailing_stop": round(
+                self.trailing_stop, 2
+            ),
             "stop_hit": stop_hit,
             "profit_pct": round(profit_pct, 2),
             "profit_rs": round(profit_rs, 2)

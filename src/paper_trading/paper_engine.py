@@ -2,29 +2,16 @@ from src.memory.trade_repository import (
     open_trade,
     close_trade
 )
-
-from src.portfolio.risk_manager import (
-    RiskManager
-)
-
-from src.portfolio.portfolio_manager import (
-    PortfolioManager
-)
-
-from src.utils.cost_calculator import (
-    calculate_trade_costs
-)
+from src.portfolio.risk_manager import RiskManager
+from src.portfolio.portfolio_manager import PortfolioManager
+from src.utils.cost_calculator import calculate_trade_costs
 
 
 class PaperEngine:
 
     def __init__(self):
-
         self.active_trades = {}
-
-        self.portfolio = (
-            PortfolioManager()
-        )
+        self.portfolio = PortfolioManager()
 
     def open_position(
         self,
@@ -32,25 +19,9 @@ class PaperEngine:
         entry_price,
         quantity,
         entry_reason,
+        atr,
         current_stop=None
     ):
-
-        position_value = (
-            entry_price
-            *
-            quantity
-        )
-
-        if not (
-            self.portfolio
-            .reserve_capital(
-                position_value
-            )
-        ):
-            raise Exception(
-                "Insufficient portfolio capital"
-            )
-
         trade = open_trade(
             symbol=symbol,
             entry_price=entry_price,
@@ -59,45 +30,14 @@ class PaperEngine:
             current_stop=current_stop
         )
 
-        atr = (
-        abs(
-            entry_price
-            -
-            current_stop
-        )
-        /
-        RiskManager.ATR_MULTIPLIER
-            if current_stop
-            else 1
+        rm = RiskManager(
+            entry_price=entry_price,
+            atr=atr
         )
 
-        self.active_trades[
-            trade.id
-        ] = RiskManager(
-            entry_price,
-            atr
-        )
+        self.active_trades[trade.id] = rm
 
         return trade
-
-    def update_position(
-        self,
-        trade_id,
-        current_value,
-        close_confirmed=False
-    ):
-
-        rm = self.active_trades.get(
-            trade_id
-        )
-
-        if not rm:
-            return None
-
-        return rm.update(
-            current_value,
-            close_confirmed
-        )
 
     def close_position(
         self,
@@ -105,7 +45,6 @@ class PaperEngine:
         exit_price,
         exit_reason
     ):
-
         trade = close_trade(
             trade_id,
             exit_price,
@@ -113,44 +52,27 @@ class PaperEngine:
         )
 
         buy_value = (
-            trade.entry_price
-            *
-            trade.quantity
+            trade.entry_price * trade.quantity
         )
 
         sell_value = (
-            trade.exit_price
-            *
-            trade.quantity
+            trade.exit_price * trade.quantity
         )
 
-        self.portfolio.release_capital(
-            buy_value
-        )
-
-        costs = (
-            calculate_trade_costs(
-                buy_value,
-                sell_value,
-                trade.pnl
-            )
+        costs = calculate_trade_costs(
+            buy_value,
+            sell_value,
+            trade.pnl
         )
 
         portfolio_result = (
-            self.portfolio
-            .apply_trade_result(
+            self.portfolio.apply_trade_result(
                 costs["net_pnl"]
             )
         )
 
-        if (
-            trade_id
-            in
-            self.active_trades
-        ):
-            del self.active_trades[
-                trade_id
-            ]
+        if trade_id in self.active_trades:
+            del self.active_trades[trade_id]
 
         return {
             "trade": trade,
