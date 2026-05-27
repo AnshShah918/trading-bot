@@ -4,12 +4,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 def format_setup(result):
 
-    ai_line = ""
     if result.get("ai_confidence"):
         ai_line = (
             f"🤖 AI:    {result['ai_confidence']}/10\n"
             f"💬 {result.get('ai_reasoning', '')}\n"
         )
+    elif result.get("ai_confidence") is None and "ai_reasoning" in result:
+        ai_line = "⚠️ AI unavailable — scanner score only\n"
+    else:
+        ai_line = ""
 
     return (
         f"🟢 *{result['symbol']}*\n"
@@ -21,7 +24,8 @@ def format_setup(result):
         f"{ai_line}"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Entry:    ₹{result['current_price']}\n"
-        f"Stop:     ₹{result['suggested_stop']} ({result['risk_pct']}% risk)\n"
+        f"Stop:     ₹{result['suggested_stop']} "
+        f"({result['risk_pct']}% risk)\n"
         f"Shares:   {result['shares_to_buy']}\n"
         f"Capital:  ₹{round(result['current_price'] * result['shares_to_buy'], 2)}"
     )
