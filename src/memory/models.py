@@ -50,6 +50,16 @@ class Trade(Base):
         String
     )
 
+    entry_time = Column(
+        DateTime,
+        nullable=True
+    )
+
+    exit_time = Column(
+        DateTime,
+        nullable=True
+    )
+
     created_at = Column(
         DateTime,
         default=datetime.utcnow

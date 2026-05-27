@@ -1,6 +1,5 @@
 import os
-
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 from kiteconnect import KiteConnect
 
 load_dotenv()
@@ -14,7 +13,6 @@ kite = KiteConnect(
 print(
     "\nLogin URL:\n"
 )
-
 print(
     kite.login_url()
 )
@@ -37,28 +35,16 @@ access_token = data[
 print(
     "\nNew Access Token:\n"
 )
-
 print(
     access_token
 )
 
-with open(
+set_key(
     ".env",
-    "w"
-) as f:
-
-    f.write(
-        f"KITE_API_KEY={os.getenv('KITE_API_KEY')}\n"
-    )
-
-    f.write(
-        f"KITE_API_SECRET={os.getenv('KITE_API_SECRET')}\n"
-    )
-
-    f.write(
-        f"KITE_ACCESS_TOKEN={access_token}\n"
-    )
+    "KITE_ACCESS_TOKEN",
+    access_token
+)
 
 print(
-    "\n.env updated"
+    "\n.env updated safely"
 )

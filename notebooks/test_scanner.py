@@ -1,95 +1,46 @@
 import os
-from datetime import (
-    datetime,
-    timedelta
-)
-from concurrent.futures import (
-    ThreadPoolExecutor,
-    as_completed
-)
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from kiteconnect import KiteConnect
 
-from src.universe.nifty500 import (
-    Nifty500
-)
-
-from src.universe.instrument_lookup import (
-    InstrumentLookup
-)
-
-from src.scanner.momentum_scanner import (
-    MomentumScanner
-)
+from src.universe.nifty500 import Nifty500
+from src.universe.instrument_lookup import InstrumentLookup
+from src.scanner.momentum_scanner import MomentumScanner
 
 load_dotenv()
 
 kite = KiteConnect(
-    api_key=os.getenv(
-        "KITE_API_KEY"
-    )
+    api_key=os.getenv("KITE_API_KEY")
 )
 
 kite.set_access_token(
-    os.getenv(
-        "KITE_ACCESS_TOKEN"
-    )
+    os.getenv("KITE_ACCESS_TOKEN")
 )
 
-print(
-    "Downloading instruments..."
+instruments = kite.instruments("NSE")
+
+token_map = InstrumentLookup.build_map(
+    instruments
 )
 
-instruments = kite.instruments(
-    "NSE"
-)
-
-token_map = (
-    InstrumentLookup.build_map(
-        instruments
-    )
-)
-
-watchlist = (
-    Nifty500.load()
-)
-
-print(
-    "Universe Size:",
-    len(
-        watchlist
-    )
-)
+watchlist = Nifty500.load()
 
 scanner = MomentumScanner()
 
 to_date = datetime.now()
-
-from_date = (
-    to_date
-    -
-    timedelta(
-        days=90
-    )
-)
+from_date = to_date - timedelta(days=365)
 
 results = []
+errors = []
 
 
-def scan_symbol(
-    symbol
-):
+def scan_symbol(symbol):
 
-    token = token_map.get(
-        symbol
-    )
+    token = token_map.get(symbol)
 
     if not token:
-        print(
-            "No token:",
-            symbol
-        )
         return None
 
     try:
@@ -102,85 +53,65 @@ def scan_symbol(
         )
 
         if not candles:
-            print(
-                "No candles:",
-                symbol
-            )
             return None
 
-        result = (
-            scanner.scan(
-                symbol=symbol,
-                candles=candles
-            )
+        return scanner.scan(
+            symbol=symbol,
+            candles=candles
         )
-
-        print(
-            "Scanned:",
-            symbol
-        )
-
-        return result
 
     except Exception as e:
-
-        print(
-            "Error:",
-            symbol,
-            str(
-                e
-            )
-        )
-
+        errors.append((symbol, str(e)))
         return None
 
 
-with ThreadPoolExecutor(
-    max_workers=2
-) as executor:
+print("Scanning universe...")
 
-    futures = [
-        executor.submit(
-            scan_symbol,
-            symbol
-        )
-        for symbol
-        in watchlist
-    ]
+with ThreadPoolExecutor(max_workers=2) as executor:
 
-    for future in as_completed(
-        futures
-    ):
+    futures = {
+        executor.submit(scan_symbol, symbol): symbol
+        for symbol in watchlist
+    }
+
+    done = 0
+
+    for future in as_completed(futures):
 
         result = future.result()
+        done += 1
 
         if result:
+            results.append(result)
 
-            results.append(
-                result
+        if done % 50 == 0:
+            print(
+                f"  {done}/{len(watchlist)} scanned..."
             )
-
-print(
-    "Total scanned:",
-    len(
-        results
-    )
-)
 
 results = sorted(
     results,
-    key=lambda x:
-    x["score"],
+    key=lambda x: x["score"],
     reverse=True
 )
 
-print(
-    "\nTop Results\n"
-)
+strong = [r for r in results if r["tier"] == "STRONG"]
+watch  = [r for r in results if r["tier"] == "WATCH"]
 
-for r in results[
-    :20
-]:
-    print(
-        r
-    )
+print(f"\nDone. {len(results)} scanned, {len(errors)} errors")
+print(f"STRONG: {len(strong)}  |  WATCH: {len(watch)}\n")
+
+print("=" * 60)
+print("STRONG SETUPS")
+print("=" * 60)
+
+for r in strong:
+    print(r)
+
+print("\n")
+print("=" * 60)
+print(f"TOP 10 WATCH")
+print("=" * 60)
+
+for r in watch[:10]:
+    print(r)

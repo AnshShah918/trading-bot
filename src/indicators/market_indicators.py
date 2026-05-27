@@ -5,37 +5,27 @@ class MarketIndicators:
         candles,
         period=20
     ):
-
-        recent = candles[
-            -period:
-        ]
-
-        return max(
+        recent = candles[-period:]
+        highs = [
             c["high"]
-            for c
-            in recent
-        )
+            for c in recent
+        ]
+        return max(highs)
 
     @staticmethod
     def average_volume(
         candles,
         period=20
     ):
-
-        recent = candles[
-            -period:
+        recent = candles[-period:]
+        volumes = [
+            c["volume"]
+            for c in recent
         ]
-
         return (
-            sum(
-                c["volume"]
-                for c
-                in recent
-            )
+            sum(volumes)
             /
-            len(
-                recent
-            )
+            len(volumes)
         )
 
     @staticmethod
@@ -43,21 +33,13 @@ class MarketIndicators:
         candles,
         period=63
     ):
-
-        relevant = candles[
-            -period:
-        ]
-
+        relevant = candles[-period:]
         first_close = (
-            relevant[0]
-            ["close"]
+            relevant[0]["close"]
         )
-
         last_close = (
-            relevant[-1]
-            ["close"]
+            relevant[-1]["close"]
         )
-
         return (
             last_close
             -
@@ -69,7 +51,6 @@ class MarketIndicators:
         candles,
         period
     ):
-
         closes = [
             c["close"]
             for c
@@ -77,7 +58,6 @@ class MarketIndicators:
                 -period:
             ]
         ]
-
         return (
             sum(closes)
             /
@@ -85,163 +65,95 @@ class MarketIndicators:
         )
 
     @staticmethod
-    def fifty_two_week_high(
-        candles
-    ):
-
-        return max(
-            c["high"]
-            for c
-            in candles
-        )
-
-    @staticmethod
     def rsi(
         candles,
         period=14
     ):
-
         closes = [
             c["close"]
             for c
             in candles
         ]
-
         gains = []
         losses = []
-
         for i in range(
             1,
             len(closes)
         ):
-
             change = (
                 closes[i]
                 -
                 closes[i - 1]
             )
-
             if change > 0:
-
-                gains.append(
-                    change
-                )
-
-                losses.append(
-                    0
-                )
-
+                gains.append(change)
+                losses.append(0)
             else:
-
-                gains.append(
-                    0
-                )
-
-                losses.append(
-                    abs(
-                        change
-                    )
-                )
+                gains.append(0)
+                losses.append(abs(change))
 
         avg_gain = (
-            sum(
-                gains[
-                    -period:
-                ]
-            )
+            sum(gains[-period:])
             /
             period
         )
-
         avg_loss = (
-            sum(
-                losses[
-                    -period:
-                ]
-            )
+            sum(losses[-period:])
             /
             period
         )
-
         if avg_loss == 0:
             return 100
-
         rs = (
             avg_gain
             /
             avg_loss
         )
-
         return (
             100
             -
             (
                 100
                 /
-                (
-                    1
-                    +
-                    rs
-                )
+                (1 + rs)
             )
         )
+
+    @staticmethod
+    def fifty_two_week_high(
+        candles
+    ):
+        highs = [
+            c["high"]
+            for c in candles
+        ]
+        return max(highs)
+
     @staticmethod
     def atr(
         candles,
         period=14
     ):
-
         true_ranges = []
-
         for i in range(
             1,
             len(candles)
         ):
-
-            high = (
-                candles[i]["high"]
-            )
-
-            low = (
-                candles[i]["low"]
-            )
-
+            high = candles[i]["high"]
+            low = candles[i]["low"]
             prev_close = (
-                candles[
-                    i - 1
-                ]["close"]
+                candles[i - 1]["close"]
             )
-
-            tr = max(
+            true_range = max(
                 high - low,
-                abs(
-                    high
-                    -
-                    prev_close
-                ),
-                abs(
-                    low
-                    -
-                    prev_close
-                )
+                abs(high - prev_close),
+                abs(low - prev_close)
             )
+            true_ranges.append(true_range)
 
-            true_ranges.append(
-                tr
-            )
-
-        recent = (
-            true_ranges[
-                -period:
-            ]
-        )
-
+        recent = true_ranges[-period:]
         return (
-            sum(
-                recent
-            )
+            sum(recent)
             /
-            len(
-                recent
-            )
+            len(recent)
         )
