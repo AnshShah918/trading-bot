@@ -1,0 +1,5 @@
+WATCHLIST = [
+    "INFY",
+    "RELIANCE",
+    "SURYAROSNI"
+]
