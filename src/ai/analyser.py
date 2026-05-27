@@ -1,7 +1,7 @@
 import os
 import json
 import time
-import google.generativeai as genai
+from google import genai
 from datetime import date
 from src.memory.trade_repository import get_closed_trades
 
@@ -92,14 +92,16 @@ def call_gemini(prompt):
     if _circuit_broken:
         return None
 
-    genai.configure(
-        api_key=os.getenv("GEMINI_API_KEY")
+    client = genai.Client(
+        api_key=API_KEY
     )
 
-    model = genai.GenerativeModel(
-        "gemini-1.5-flash"
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
     )
 
+    text = response.text
     for attempt in range(MAX_RETRIES + 1):
         try:
             response = model.generate_content(
