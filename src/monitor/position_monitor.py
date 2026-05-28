@@ -12,15 +12,22 @@ from src.memory.trade_repository import (
 from src.portfolio.risk_manager import RiskManager
 from src.portfolio.portfolio_manager import PortfolioManager
 from src.indicators.market_indicators import MarketIndicators
-from src.universe.instrument_lookup import InstrumentLookup
 from src.utils.cost_calculator import calculate_trade_costs
+from src.utils.trading_calendar import is_t1_ready
+from src.config.settings import (
+    NIFTY_CIRCUIT_BREAKER_PCT,
+    MONITOR_INTERVAL_MARKET,
+    MONITOR_INTERVAL_OUTSIDE
+)
 
 load_dotenv()
 
 portfolio = PortfolioManager()
 
 MIN_PROFIT_RS = 1500
-MIN_PROFIT_PCT = 0.08
+MIN_PROFIT_PCT = 8.0
+
+NIFTY_TOKEN = 256265  # NSE:NIFTY 50
 
 
 def get_kite():
@@ -33,42 +40,50 @@ def get_kite():
     return kite
 
 
-def fetch_current_price_and_atr(
-    kite,
-    token,
-    symbol
-):
-    to_date = datetime.now()
-    from_date = to_date - timedelta(days=30)
-
-    candles = kite.historical_data(
-        instrument_token=token,
-        from_date=from_date,
-        to_date=to_date,
-        interval="day"
-    )
-
-    if not candles:
-        return None, None
-
-    current_price = candles[-1]["close"]
-    atr = MarketIndicators.atr(candles)
-
-    return current_price, atr
-
-
 def check_trend(candles):
     ma20 = MarketIndicators.moving_average(candles, 20)
     ma50 = MarketIndicators.moving_average(candles, 50)
     rsi = MarketIndicators.rsi(candles)
     current = candles[-1]["close"]
 
-    trend_strong = (
+    return (
         current > ma20 > ma50
         and rsi < 70
     )
 
-    return trend_strong
+
+def check_nifty_circuit(kite):
+    try:
+        to_date = datetime.now()
+        from_date = to_date - timedelta(days=5)
+
+        candles = kite.historical_data(
+            instrument_token=NIFTY_TOKEN,
+            from_date=from_date,
+            to_date=to_date,
+            interval="day"
+        )
+
+        if len(candles) < 2:
+            return False, 0.0
+
+        prev_close = candles[-2]["close"]
+        current = candles[-1]["close"]
+
+        change_pct = (
+            (current - prev_close)
+            / prev_close * 100
+        )
+
+        circuit_hit = (
+            change_pct <= -NIFTY_CIRCUIT_BREAKER_PCT
+        )
+
+        return circuit_hit, round(change_pct, 2)
+
+    except Exception as e:
+        print(f"Nifty circuit check error: {e}")
+        return False, 0.0
 
 
 async def monitor_once(bot, token_map):
@@ -79,6 +94,23 @@ async def monitor_once(bot, token_map):
         return
 
     kite = get_kite()
+
+    # Check Nifty first
+    circuit_hit, nifty_change = check_nifty_circuit(kite)
+
+    if circuit_hit:
+        await bot.send_message(
+            chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+            text=(
+                f"🚨 *MARKET ALERT*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Nifty 50: {nifty_change}%\n"
+                f"Circuit breaker triggered!\n"
+                f"Tightening all stop losses.\n"
+                f"Consider /pause to stop new trades."
+            ),
+            parse_mode="Markdown"
+        )
 
     for trade in trades:
 
@@ -105,18 +137,20 @@ async def monitor_once(bot, token_map):
             current_price = candles[-1]["close"]
             current_atr = MarketIndicators.atr(candles)
 
-            # Restore risk manager state from DB
+            # Tighten stop if circuit hit
+            atr_multiplier = (
+                1.0 if circuit_hit else 1.5
+            )
+
             rm = RiskManager(
                 entry_price=trade.entry_price,
                 atr=current_atr
             )
 
-            # Restore highest price from DB
-            if trade.highest_price:
-                rm.highest_price = trade.highest_price
-                rm.trailing_stop = (
-                    trade.current_stop
-                    or rm.trailing_stop
+            if trade.highest_price and trade.current_stop:
+                rm.restore(
+                    highest_price=trade.highest_price,
+                    current_stop=trade.current_stop
                 )
 
             result = rm.update(
@@ -124,20 +158,15 @@ async def monitor_once(bot, token_map):
                 current_atr=current_atr
             )
 
-            # Always update stop in DB
             update_trade_stop(
                 trade_id=trade.id,
                 current_stop=result["trailing_stop"],
                 highest_price=result["highest_price"]
             )
 
-            hold_days = (
-                datetime.utcnow() - trade.entry_time
-            ).days if trade.entry_time else 0
+            t1_ready = is_t1_ready(trade.entry_time)
 
-            t1_ready = hold_days >= 1
-
-            # STOP HIT — auto exit
+            # STOP HIT
             if result["stop_hit"] and t1_ready:
 
                 closed = close_trade(
@@ -159,12 +188,11 @@ async def monitor_once(bot, token_map):
                 await bot.send_message(
                     chat_id=os.getenv("TELEGRAM_CHAT_ID"),
                     text=(
-                        f"🔴 *Stop Loss Hit — {trade.symbol}*\n"
+                        f"🔴 *Stop Hit — {trade.symbol}*\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
-                        f"Exit:      ₹{current_price}\n"
-                        f"Entry:     ₹{trade.entry_price}\n"
-                        f"Net P&L:   ₹{costs['net_pnl']:,.0f}\n"
-                        f"Charges:   ₹{costs['charges']}\n"
+                        f"Exit:    ₹{current_price}\n"
+                        f"Entry:   ₹{trade.entry_price}\n"
+                        f"Net P&L: ₹{costs['net_pnl']:,.0f}\n"
                         f"Trade #{trade.id} closed."
                     ),
                     parse_mode="Markdown"
@@ -172,16 +200,20 @@ async def monitor_once(bot, token_map):
 
                 continue
 
-            # PROFIT THRESHOLD — check trend
+            # T+1 not ready yet
+            if not t1_ready:
+                continue
+
+            # PROFIT THRESHOLD
             profit_rs = result["profit_rs"] * trade.quantity
             profit_pct = result["profit_pct"]
 
             threshold_hit = (
                 profit_rs >= MIN_PROFIT_RS
-                or profit_pct >= MIN_PROFIT_PCT * 100
+                or profit_pct >= MIN_PROFIT_PCT
             )
 
-            if threshold_hit and t1_ready:
+            if threshold_hit:
 
                 trend_strong = check_trend(candles)
 
@@ -189,14 +221,17 @@ async def monitor_once(bot, token_map):
                     await bot.send_message(
                         chat_id=os.getenv("TELEGRAM_CHAT_ID"),
                         text=(
-                            f"📈 *{trade.symbol}* +{profit_pct}%\n"
+                            f"📈 *{trade.symbol}* "
+                            f"+{profit_pct}% "
+                            f"(₹{profit_rs:,.0f})\n"
                             f"Trend intact — holding.\n"
-                            f"Stop trailed to ₹{result['trailing_stop']}"
+                            f"Stop → ₹{result['trailing_stop']}"
                         ),
                         parse_mode="Markdown"
                     )
 
                 else:
+
                     closed = close_trade(
                         trade.id,
                         current_price,
@@ -216,23 +251,28 @@ async def monitor_once(bot, token_map):
                     await bot.send_message(
                         chat_id=os.getenv("TELEGRAM_CHAT_ID"),
                         text=(
-                            f"📤 *Profit Booked — {trade.symbol}*\n"
+                            f"📤 *Profit Booked — "
+                            f"{trade.symbol}*\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"Exit:      ₹{current_price}\n"
-                            f"Net P&L:   ₹{costs['net_pnl']:,.0f}\n"
-                            f"Reason:    Trend weakening at profit\n"
+                            f"Exit:    ₹{current_price}\n"
+                            f"Net P&L: ₹{costs['net_pnl']:,.0f}\n"
+                            f"Reason:  Trend weakening\n"
                             f"Trade #{trade.id} closed."
                         ),
                         parse_mode="Markdown"
                     )
 
         except Exception as e:
-            print(f"Monitor error {trade.symbol}: {e}")
+            print(
+                f"Monitor error {trade.symbol}: {e}"
+            )
             continue
 
 
 async def run_monitor(bot, token_map):
+
     while True:
+
         now = datetime.now()
 
         market_open = now.replace(
@@ -242,8 +282,16 @@ async def run_monitor(bot, token_map):
             hour=15, minute=30, second=0
         )
 
-        if market_open <= now <= market_close:
+        in_market_hours = (
+            market_open <= now <= market_close
+        )
+
+        if in_market_hours:
             await monitor_once(bot, token_map)
-            await asyncio.sleep(1800)  # 30 mins
+            await asyncio.sleep(
+                MONITOR_INTERVAL_MARKET  # 5 mins
+            )
         else:
-            await asyncio.sleep(300)   # 5 mins outside hours
+            await asyncio.sleep(
+                MONITOR_INTERVAL_OUTSIDE  # 30 mins
+            )

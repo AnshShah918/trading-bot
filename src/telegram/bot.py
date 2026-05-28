@@ -15,6 +15,11 @@ from src.telegram.notifier import send_setup, send_message
 from src.telegram.commands import register_commands
 from src.paper_trading.paper_engine import PaperEngine
 from src.ai.analyser import analyse_setups, get_cost_summary
+from src.utils.trading_calendar import is_trading_day
+from src.config.settings import (
+    MAX_OPEN_TRADES,
+    MIN_VIABLE_TRADE
+)
 
 load_dotenv()
 
@@ -24,6 +29,23 @@ paper = PaperEngine()
 pending_setups = {}
 sent_today = set()
 token_map = {}
+
+
+def get_available_capital():
+    from src.memory.trade_repository import get_open_trades
+
+    open_trades = get_open_trades()
+
+    deployed = sum(
+        t.entry_price * t.quantity
+        for t in open_trades
+    )
+
+    available = (
+        paper.portfolio.current_capital - deployed
+    )
+
+    return max(0, available), len(open_trades)
 
 
 async def handle_decision(
@@ -46,6 +68,24 @@ async def handle_decision(
 
     if action == "YES" and setup:
 
+        # Final capital check at tap time
+        available, open_count = get_available_capital()
+
+        if open_count >= MAX_OPEN_TRADES:
+            await query.edit_message_text(
+                f"❌ Max trades ({MAX_OPEN_TRADES}) "
+                f"already open. Close one first."
+            )
+            return
+
+        if available < MIN_VIABLE_TRADE:
+            await query.edit_message_text(
+                f"❌ Insufficient capital.\n"
+                f"Available: ₹{available:,.0f}\n"
+                f"Minimum:   ₹{MIN_VIABLE_TRADE:,.0f}"
+            )
+            return
+
         trade = paper.open_position(
             symbol=symbol,
             entry_price=setup["current_price"],
@@ -63,8 +103,10 @@ async def handle_decision(
             f"✅ *{symbol}* — Trade Opened\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Entry:   ₹{setup['current_price']}\n"
-            f"Shares:  {setup['shares_to_buy']}\n"
+            f"Target:  ₹{setup['target_price']}\n"
             f"Stop:    ₹{setup['suggested_stop']}\n"
+            f"Shares:  {setup['shares_to_buy']}\n"
+            f"Capital: ₹{setup['trade_value']}\n"
             f"Trade ID: #{trade.id}",
             parse_mode="Markdown"
         )
@@ -93,15 +135,45 @@ async def run_scan(application, scan_type="morning"):
 
     bot = application.bot
 
+    # Skip if not a trading day
+    if not is_trading_day():
+        await send_message(
+            bot,
+            "📅 Market closed today — no scan."
+        )
+        return
+
     label = {
         "morning": "🌅 Morning",
         "midday": "☀️ Mid-day",
         "closing": "🌆 Closing"
     }.get(scan_type, "")
 
+    # Check capital and open trades before scanning
+    available, open_count = get_available_capital()
+
+    if open_count >= MAX_OPEN_TRADES:
+        await send_message(
+            bot,
+            f"📊 {label} scan skipped.\n"
+            f"Max trades open ({open_count}/{MAX_OPEN_TRADES})."
+        )
+        return
+
+    if available < MIN_VIABLE_TRADE:
+        await send_message(
+            bot,
+            f"💰 {label} scan skipped.\n"
+            f"Available capital ₹{available:,.0f} "
+            f"below minimum ₹{MIN_VIABLE_TRADE:,.0f}."
+        )
+        return
+
     await send_message(
         bot,
-        f"{label} scan starting..."
+        f"{label} scan starting...\n"
+        f"Capital available: ₹{available:,.0f}\n"
+        f"Open trades: {open_count}/{MAX_OPEN_TRADES}"
     )
 
     kite = KiteConnect(
@@ -136,9 +208,12 @@ async def run_scan(application, scan_type="morning"):
                 return None
             result = scanner.scan(
                 symbol=symbol,
-                candles=candles
+                candles=candles,
+                available_capital=available
             )
-            result["current_price"] = candles[-1]["close"]
+            result["current_price"] = (
+                candles[-1]["close"]
+            )
             return result
         except Exception:
             return None
@@ -166,15 +241,18 @@ async def run_scan(application, scan_type="morning"):
     if scan_type == "closing":
         await send_message(
             bot,
-            "🌆 Closing scan — reviewing open positions only."
+            "🌆 Closing scan — reviewing open positions."
         )
         return
+
+    # Slots available
+    slots = MAX_OPEN_TRADES - open_count
 
     strong = [
         r for r in results
         if r["tier"] == "STRONG"
         and r["symbol"] not in sent_today
-    ]
+    ][:slots]  # Never send more than available slots
 
     if not strong:
         await send_message(
@@ -193,7 +271,7 @@ async def run_scan(application, scan_type="morning"):
     if not analysed:
         await send_message(
             bot,
-            "🤖 AI found no high-confidence setups this scan."
+            "🤖 No high-confidence setups this scan."
         )
         return
 
@@ -201,8 +279,8 @@ async def run_scan(application, scan_type="morning"):
 
     await send_message(
         bot,
-        f"{label} scan done.\n"
-        f"{len(analysed)} setup(s) passed AI review.\n"
+        f"{label} scan done — "
+        f"{len(analysed)} setup(s) found.\n"
         f"AI calls today: {costs['today_calls']}"
     )
 
@@ -219,10 +297,11 @@ async def run_eod_summary(bot):
     )
 
     open_trades = get_open_trades()
+
     closed_today = [
         t for t in get_closed_trades()
-        if t.exit_time and
-        t.exit_time.date() == datetime.utcnow().date()
+        if t.exit_time
+        and t.exit_time.date() == datetime.utcnow().date()
     ]
 
     total_pnl = sum(
@@ -230,6 +309,7 @@ async def run_eod_summary(bot):
     )
 
     costs = get_cost_summary()
+    available, _ = get_available_capital()
 
     await send_message(
         bot,
@@ -238,6 +318,7 @@ async def run_eod_summary(bot):
         f"Open trades:    {len(open_trades)}\n"
         f"Closed today:   {len(closed_today)}\n"
         f"Today P&L:      ₹{total_pnl:,.0f}\n"
+        f"Available:      ₹{available:,.0f}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"AI calls today: {costs['today_calls']}\n"
         f"AI calls month: {costs['month_calls']}\n"
@@ -305,7 +386,8 @@ def main():
 
     register_commands(app)
 
-    print("Bot running. Market hours: 9:15 AM - 3:30 PM IST")
+    print("Bot running.")
+    print("Scans: 8:45 AM | 12:00 PM | 3:00 PM IST")
     print("Commands: /status /portfolio /close /pause /resume")
 
     app.run_polling()

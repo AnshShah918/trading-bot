@@ -9,7 +9,7 @@ def format_setup(result):
             f"🤖 AI:    {result['ai_confidence']}/10\n"
             f"💬 {result.get('ai_reasoning', '')}\n"
         )
-    elif result.get("ai_confidence") is None and "ai_reasoning" in result:
+    elif result.get("ai_reasoning") is not None:
         ai_line = "⚠️ AI unavailable — scanner score only\n"
     else:
         ai_line = ""
@@ -24,10 +24,11 @@ def format_setup(result):
         f"{ai_line}"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Entry:    ₹{result['current_price']}\n"
-        f"Stop:     ₹{result['suggested_stop']} "
-        f"({result['risk_pct']}% risk)\n"
+        f"Target:   ₹{result['target_price']} (+{result['target_pct']}%)\n"
+        f"Stop:     ₹{result['suggested_stop']} (-{result['risk_pct']}%)\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
         f"Shares:   {result['shares_to_buy']}\n"
-        f"Capital:  ₹{round(result['current_price'] * result['shares_to_buy'], 2)}"
+        f"Capital:  ₹{result['trade_value']}"
     )
 
 
