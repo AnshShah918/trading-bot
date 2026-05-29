@@ -22,7 +22,11 @@ from src.config.settings import (
     RESERVE_PERCENT,
     TOP_N_TO_AI,
     MAX_AI_PICKS,
-    TEST_MODE
+    TEST_MODE,
+    MORNING_SCAN_TIME,
+    MIDDAY_SCAN_TIME,
+    CLOSING_SCAN_TIME,
+    EOD_TIME
 )
 
 load_dotenv()
@@ -47,13 +51,8 @@ def get_capital_status():
     )
 
     total = paper.portfolio.current_capital
-
     reserve = total * RESERVE_PERCENT
-
-    available = max(
-        0,
-        total - deployed - reserve
-    )
+    available = max(0, total - deployed - reserve)
 
     return {
         "total": total,
@@ -62,6 +61,14 @@ def get_capital_status():
         "available": available,
         "open_count": len(open_trades)
     }
+
+
+def get_live_price(kite, symbol):
+    try:
+        quote = kite.quote(f"NSE:{symbol}")
+        return quote[f"NSE:{symbol}"]["last_price"]
+    except Exception:
+        return None
 
 
 async def handle_decision(
@@ -162,8 +169,7 @@ async def run_scan(application, scan_type="morning"):
     if cap["open_count"] >= MAX_OPEN_TRADES:
         await send_message(
             bot,
-            f"📊 Scan skipped — "
-            f"max trades open "
+            f"📊 Scan skipped — max trades open "
             f"({cap['open_count']}/{MAX_OPEN_TRADES})."
         )
         return
@@ -221,15 +227,61 @@ async def run_scan(application, scan_type="morning"):
             )
             if not candles:
                 return None
+
             result = scanner.scan(
                 symbol=symbol,
                 candles=candles,
                 available_capital=cap["available"]
             )
+
+            # Use live price instead of yesterday's close
+            live_price = get_live_price(kite, symbol)
+
             result["current_price"] = (
-                candles[-1]["close"]
+                live_price
+                if live_price
+                else candles[-1]["close"]
             )
+
+            # Recalculate stop and target from live price
+            if live_price:
+                atr = result["atr"]
+                stop = round(
+                    live_price - (atr * 1.5), 2
+                )
+                risk = live_price - stop
+                target = round(
+                    live_price + (risk * 2), 2
+                )
+                risk_pct = round(
+                    risk / live_price * 100, 2
+                )
+                target_pct = round(
+                    (target - live_price)
+                    / live_price * 100, 2
+                )
+
+                result["suggested_stop"] = stop
+                result["target_price"] = target
+                result["risk_pct"] = risk_pct
+                result["target_pct"] = target_pct
+                result["risk_per_share"] = round(risk, 2)
+
+                # Recalculate shares from live price
+                if cap["available"] > 0:
+                    position_capital = (
+                        cap["available"] * 0.25
+                    )
+                    result["shares_to_buy"] = int(
+                        position_capital / live_price
+                    )
+                    result["trade_value"] = round(
+                        result["shares_to_buy"]
+                        * live_price, 2
+                    )
+
             return result
+
         except Exception:
             return None
 
@@ -275,7 +327,6 @@ async def run_scan(application, scan_type="morning"):
         )
         return
 
-    # Top N to AI
     top_n = strong[:TOP_N_TO_AI]
 
     await send_message(
@@ -368,35 +419,34 @@ async def scheduler(application):
         today = now.date().isoformat()
         key = now.strftime("%H:%M")
 
-        # Reset at midnight
         if today not in fired_today:
             sent_today.clear()
             fired_today.clear()
             fired_today.add(today)
 
         if (
-            key == "08:45"
+            key == MORNING_SCAN_TIME
             and "morning" not in fired_today
         ):
             fired_today.add("morning")
             await run_scan(application, "morning")
 
         elif (
-            key == "12:00"
+            key == MIDDAY_SCAN_TIME
             and "midday" not in fired_today
         ):
             fired_today.add("midday")
             await run_scan(application, "midday")
 
         elif (
-            key == "15:00"
+            key == CLOSING_SCAN_TIME
             and "closing" not in fired_today
         ):
             fired_today.add("closing")
             await run_scan(application, "closing")
 
         elif (
-            key == "15:30"
+            key == EOD_TIME
             and "eod" not in fired_today
         ):
             fired_today.add("eod")
@@ -413,36 +463,40 @@ async def post_init(application: Application):
         run_monitor(application.bot, token_map)
     )
 
-    # Smart startup — run appropriate scan
-    # based on what time bot is started
     now = datetime.now()
     hour = now.hour
+    minute = now.minute
+    current_time = now.strftime("%H:%M")
 
     if not is_trading_day() and not TEST_MODE:
         await send_message(
             application.bot,
             "📅 Market closed today.\n"
-            "Monitoring open positions only.\n"
-            "Next scan on next trading day."
+            "Monitoring open positions only."
         )
         return
 
-    if hour < 8:
+    # Before market opens
+    if hour < 9 or (hour == 9 and minute < 20):
         await send_message(
             application.bot,
-            "🤖 Bot ready.\n"
-            "Morning scan will run at 8:45 AM."
+            f"🤖 Bot ready.\n"
+            f"Morning scan at {MORNING_SCAN_TIME} AM\n"
+            f"(after market opens at 9:15 AM)"
         )
 
+    # Market hours — morning window
     elif hour < 12:
         fired_today.add("morning")
         await run_scan(application, "morning")
 
+    # Mid-day window
     elif hour < 15:
         fired_today.add("morning")
         fired_today.add("midday")
         await run_scan(application, "midday")
 
+    # After market
     else:
         fired_today.add("morning")
         fired_today.add("midday")
@@ -451,7 +505,7 @@ async def post_init(application: Application):
             application.bot,
             "🌆 Started after market hours.\n"
             "Monitoring open positions.\n"
-            "Next scan tomorrow at 8:45 AM."
+            f"Next scan tomorrow at {MORNING_SCAN_TIME} AM."
         )
 
 
@@ -471,8 +525,15 @@ def main():
     register_commands(app)
 
     print("Bot running.")
-    print("Scans: 8:45 AM | 12:00 PM | 3:00 PM IST")
-    print("Commands: /status /portfolio /close /pause /resume")
+    print(
+        f"Scans: {MORNING_SCAN_TIME} AM | "
+        f"{MIDDAY_SCAN_TIME} PM | "
+        f"{CLOSING_SCAN_TIME} PM IST"
+    )
+    print(
+        "Commands: /status /portfolio "
+        "/close /pause /resume"
+    )
 
     app.run_polling()
 
