@@ -3,7 +3,10 @@ import json
 import time
 from google import genai
 from datetime import date
-from src.memory.trade_repository import get_closed_trades
+from src.memory.trade_repository import (
+    get_closed_trades,
+    get_open_trades
+)
 
 AI_COST_FILE = "data/ai_costs.json"
 MAX_CALLS_PER_DAY = 50
@@ -23,8 +26,7 @@ def load_costs():
         return {
             "today_calls": 0,
             "month_calls": 0,
-            "date": "",
-            "circuit_broken": False
+            "date": ""
         }
 
 
@@ -48,7 +50,6 @@ def track_call():
     costs["today_calls"] += 1
     costs["month_calls"] += 1
     save_costs(costs)
-    return costs["today_calls"]
 
 
 def get_call_count():
@@ -86,15 +87,45 @@ def build_trade_history():
     return "\n".join(lines)
 
 
-def call_gemini(prompt):
+def build_open_positions():
+    trades = get_open_trades()
 
+    if not trades:
+        return "None"
+
+    lines = []
+
+    for t in trades:
+        hold_days = (
+            (
+                __import__("datetime")
+                .datetime.utcnow() - t.entry_time
+            ).days
+            if t.entry_time else 0
+        )
+        unrealised = (
+            (
+                (t.last_known_price or t.entry_price)
+                - t.entry_price
+            ) * t.quantity
+        )
+        lines.append(
+            f"{t.symbol}: entry ₹{t.entry_price} "
+            f"× {t.quantity} shares, "
+            f"held {hold_days}d, "
+            f"unrealised ₹{round(unrealised, 0)}"
+        )
+
+    return "\n".join(lines)
+
+
+def call_gemini(prompt):
     global _consecutive_failures
     global _circuit_broken
 
     if _circuit_broken:
         return None
 
-    # Read key here — after load_dotenv() has run
     api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
@@ -105,15 +136,11 @@ def call_gemini(prompt):
 
         try:
 
-            client = genai.Client(
-                api_key=api_key
-            )
+            client = genai.Client(api_key=api_key)
 
-            response = (
-                client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=prompt,
-                )
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
             )
 
             _consecutive_failures = 0
@@ -134,14 +161,11 @@ def call_gemini(prompt):
                 >=
                 MAX_FAILURES_BEFORE_CIRCUIT_BREAK
             ):
-
                 _circuit_broken = True
-
                 print(
                     "Circuit breaker triggered. "
                     "AI disabled for this session."
                 )
-
                 return None
 
             if attempt < MAX_RETRIES:
@@ -150,62 +174,83 @@ def call_gemini(prompt):
     return None
 
 
-def analyse_setups(setups):
+def analyse_setups(
+    setups,
+    available_capital,
+    max_picks=2
+):
     global _circuit_broken
 
     if not setups:
         return setups
 
     if _circuit_broken:
-        print("AI circuit broken. Skipping.")
+        print("AI circuit broken. Passing through.")
         return setups
 
-    calls_today = get_call_count()
-
-    if calls_today >= MAX_CALLS_PER_DAY:
-        print(
-            f"Daily AI limit reached "
-            f"({MAX_CALLS_PER_DAY} calls). Skipping."
-        )
+    if get_call_count() >= MAX_CALLS_PER_DAY:
+        print("Daily AI limit reached. Passing through.")
         return setups
 
     trade_history = build_trade_history()
+    open_positions = build_open_positions()
+
+    # Open symbols — AI must not suggest these
+    open_symbols = [
+        t.symbol for t in get_open_trades()
+    ]
 
     setups_text = "\n".join([
-        f"{s['symbol']}: score={s['score']} "
+        f"{i+1}. {s['symbol']}: "
+        f"score={s['score']} "
         f"rsi={s['rsi']} "
         f"momentum={s['momentum']} "
         f"volume={s['volume_ratio']}x "
-        f"tier={s['tier']} "
-        f"risk={s['risk_pct']}%"
-        for s in setups
+        f"risk={s['risk_pct']}% "
+        f"stop=₹{s['suggested_stop']} "
+        f"target=₹{s['target_price']} "
+        f"price=₹{s['current_price']}"
+        for i, s in enumerate(setups)
     ])
 
-    prompt = f"""You are an expert Indian stock market analyst.
+    prompt = f"""You are a strict Indian stock market analyst managing a ₹50,000 portfolio.
 
-TRADE HISTORY (learn from these):
-{trade_history}
+AVAILABLE CAPITAL TO DEPLOY: ₹{available_capital:,.0f}
+(This is after keeping reserve. Do NOT exceed this.)
 
-TODAY'S SETUPS:
+CURRENTLY OPEN POSITIONS (DO NOT suggest these again):
+{open_positions}
+
+SYMBOLS ALREADY OPEN (NEVER suggest): {', '.join(open_symbols) if open_symbols else 'None'}
+
+TODAY'S TOP SETUPS (scanner approved):
 {setups_text}
 
-Respond ONLY with a JSON array. No explanation. No markdown. Just raw JSON.
+TRADE HISTORY (learn from wins and losses):
+{trade_history}
+
+YOUR JOB:
+- Pick MAXIMUM {max_picks} trades from the setups above
+- If nothing is good enough, pick ZERO — that is fine
+- Never suggest a symbol already in open positions
+- Avoid 2 stocks from same business group (Adani/Tata/HDFC etc)
+- Allocate specific ₹ amount per trade (must total <= ₹{available_capital:,.0f})
+- Learn from trade history — avoid patterns that lost before
+- Be strict — only high conviction trades
+
+Respond ONLY with raw JSON array. No markdown. No explanation.
 
 [
   {{
     "symbol": "SYMBOL",
-    "confidence": 7.5,
+    "confidence": 8.2,
     "action": "BUY",
+    "allocation_inr": 12000,
     "reasoning": "One sentence max"
   }}
 ]
 
-Rules:
-- confidence 1-10
-- action: BUY or SKIP
-- Only include setups you recommend (action=BUY)
-- Flag sector concentration (avoid 2 stocks same group)
-- Learn from trade history"""
+If no good trades: return empty array []"""
 
     raw = call_gemini(prompt)
 
@@ -231,10 +276,12 @@ Rules:
         print(f"AI parse error: {e}")
         return setups
 
+    # Build map of AI picks
     rec_map = {
         r["symbol"]: r
         for r in recommendations
         if r.get("action") == "BUY"
+        and r.get("symbol") not in open_symbols
     }
 
     result = []
@@ -249,16 +296,33 @@ Rules:
             setup["ai_reasoning"] = (
                 rec.get("reasoning", "")
             )
-        else:
-            setup["ai_confidence"] = None
-            setup["ai_reasoning"] = None
+            setup["ai_allocation"] = (
+                rec.get("allocation_inr", 0)
+            )
 
-        result.append(setup)
+            # Recalculate shares based on AI allocation
+            if (
+                rec.get("allocation_inr")
+                and setup["current_price"] > 0
+            ):
+                setup["shares_to_buy"] = int(
+                    rec["allocation_inr"]
+                    /
+                    setup["current_price"]
+                )
+                setup["trade_value"] = round(
+                    setup["shares_to_buy"]
+                    *
+                    setup["current_price"],
+                    2
+                )
+
+            result.append(setup)
+
+        # Stocks AI skipped are NOT sent to Telegram
 
     result.sort(
-        key=lambda x: (
-            x.get("ai_confidence") or 0
-        ),
+        key=lambda x: x.get("ai_confidence") or 0,
         reverse=True
     )
 
@@ -266,19 +330,15 @@ Rules:
 
 
 def get_cost_summary():
-
     costs = load_costs()
     costs = reset_if_new_day(costs)
-
     today_calls = costs.get("today_calls", 0)
-    month_calls = costs.get("month_calls", 0)
 
     return {
         "today_calls": today_calls,
-        "month_calls": month_calls,
+        "month_calls": costs.get("month_calls", 0),
         "circuit_broken": _circuit_broken,
         "calls_remaining": max(
-            0,
-            MAX_CALLS_PER_DAY - today_calls
+            0, MAX_CALLS_PER_DAY - today_calls
         )
     }

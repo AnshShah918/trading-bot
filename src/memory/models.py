@@ -70,6 +70,11 @@ class Trade(Base):
         nullable=True
     )
 
+    last_known_price = Column(
+        Float,
+        nullable=True
+    )
+
     created_at = Column(
         DateTime,
         default=datetime.utcnow

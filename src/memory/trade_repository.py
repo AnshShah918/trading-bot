@@ -20,7 +20,8 @@ def open_trade(
         entry_reason=entry_reason,
         entry_time=datetime.utcnow(),
         current_stop=current_stop,
-        highest_price=entry_price
+        highest_price=entry_price,
+        last_known_price=entry_price
     )
 
     db.add(trade)
@@ -76,6 +77,23 @@ def update_trade_stop(
     if trade:
         trade.current_stop = current_stop
         trade.highest_price = highest_price
+        db.commit()
+
+    db.close()
+
+
+def update_last_price(
+    trade_id,
+    last_known_price
+):
+    db = get_db()
+
+    trade = db.query(Trade).filter(
+        Trade.id == trade_id
+    ).first()
+
+    if trade:
+        trade.last_known_price = last_known_price
         db.commit()
 
     db.close()

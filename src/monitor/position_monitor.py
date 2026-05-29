@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 from src.memory.trade_repository import (
     get_open_trades,
     close_trade,
-    update_trade_stop
+    update_trade_stop,
+    update_last_price
 )
 from src.portfolio.risk_manager import RiskManager
 from src.portfolio.portfolio_manager import PortfolioManager
@@ -27,7 +28,7 @@ portfolio = PortfolioManager()
 MIN_PROFIT_RS = 1500
 MIN_PROFIT_PCT = 8.0
 
-NIFTY_TOKEN = 256265  # NSE:NIFTY 50
+NIFTY_TOKEN = 256265
 
 
 def get_kite():
@@ -45,11 +46,7 @@ def check_trend(candles):
     ma50 = MarketIndicators.moving_average(candles, 50)
     rsi = MarketIndicators.rsi(candles)
     current = candles[-1]["close"]
-
-    return (
-        current > ma20 > ma50
-        and rsi < 70
-    )
+    return current > ma20 > ma50 and rsi < 70
 
 
 def check_nifty_circuit(kite):
@@ -75,14 +72,13 @@ def check_nifty_circuit(kite):
             / prev_close * 100
         )
 
-        circuit_hit = (
-            change_pct <= -NIFTY_CIRCUIT_BREAKER_PCT
+        return (
+            change_pct <= -NIFTY_CIRCUIT_BREAKER_PCT,
+            round(change_pct, 2)
         )
 
-        return circuit_hit, round(change_pct, 2)
-
     except Exception as e:
-        print(f"Nifty circuit check error: {e}")
+        print(f"Nifty check error: {e}")
         return False, 0.0
 
 
@@ -95,8 +91,9 @@ async def monitor_once(bot, token_map):
 
     kite = get_kite()
 
-    # Check Nifty first
-    circuit_hit, nifty_change = check_nifty_circuit(kite)
+    circuit_hit, nifty_change = (
+        check_nifty_circuit(kite)
+    )
 
     if circuit_hit:
         await bot.send_message(
@@ -106,8 +103,8 @@ async def monitor_once(bot, token_map):
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"Nifty 50: {nifty_change}%\n"
                 f"Circuit breaker triggered!\n"
-                f"Tightening all stop losses.\n"
-                f"Consider /pause to stop new trades."
+                f"Stops tightened on all positions.\n"
+                f"Consider /pause for new trades."
             ),
             parse_mode="Markdown"
         )
@@ -137,10 +134,8 @@ async def monitor_once(bot, token_map):
             current_price = candles[-1]["close"]
             current_atr = MarketIndicators.atr(candles)
 
-            # Tighten stop if circuit hit
-            atr_multiplier = (
-                1.0 if circuit_hit else 1.5
-            )
+            # Always update last known price
+            update_last_price(trade.id, current_price)
 
             rm = RiskManager(
                 entry_price=trade.entry_price,
@@ -152,6 +147,10 @@ async def monitor_once(bot, token_map):
                     highest_price=trade.highest_price,
                     current_stop=trade.current_stop
                 )
+
+            # Tighten stop on circuit breaker
+            if circuit_hit:
+                rm.ATR_MULTIPLIER = 1.0
 
             result = rm.update(
                 current_price=current_price,
@@ -200,12 +199,13 @@ async def monitor_once(bot, token_map):
 
                 continue
 
-            # T+1 not ready yet
             if not t1_ready:
                 continue
 
             # PROFIT THRESHOLD
-            profit_rs = result["profit_rs"] * trade.quantity
+            profit_rs = (
+                result["profit_rs"] * trade.quantity
+            )
             profit_pct = result["profit_pct"]
 
             threshold_hit = (
@@ -219,7 +219,9 @@ async def monitor_once(bot, token_map):
 
                 if trend_strong:
                     await bot.send_message(
-                        chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+                        chat_id=os.getenv(
+                            "TELEGRAM_CHAT_ID"
+                        ),
                         text=(
                             f"📈 *{trade.symbol}* "
                             f"+{profit_pct}% "
@@ -249,7 +251,9 @@ async def monitor_once(bot, token_map):
                     )
 
                     await bot.send_message(
-                        chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+                        chat_id=os.getenv(
+                            "TELEGRAM_CHAT_ID"
+                        ),
                         text=(
                             f"📤 *Profit Booked — "
                             f"{trade.symbol}*\n"
@@ -263,9 +267,7 @@ async def monitor_once(bot, token_map):
                     )
 
         except Exception as e:
-            print(
-                f"Monitor error {trade.symbol}: {e}"
-            )
+            print(f"Monitor error {trade.symbol}: {e}")
             continue
 
 
@@ -288,10 +290,6 @@ async def run_monitor(bot, token_map):
 
         if in_market_hours:
             await monitor_once(bot, token_map)
-            await asyncio.sleep(
-                MONITOR_INTERVAL_MARKET  # 5 mins
-            )
+            await asyncio.sleep(MONITOR_INTERVAL_MARKET)
         else:
-            await asyncio.sleep(
-                MONITOR_INTERVAL_OUTSIDE  # 30 mins
-            )
+            await asyncio.sleep(MONITOR_INTERVAL_OUTSIDE)

@@ -18,7 +18,11 @@ from src.ai.analyser import analyse_setups, get_cost_summary
 from src.utils.trading_calendar import is_trading_day
 from src.config.settings import (
     MAX_OPEN_TRADES,
-    MIN_VIABLE_TRADE
+    MIN_VIABLE_TRADE,
+    RESERVE_PERCENT,
+    TOP_N_TO_AI,
+    MAX_AI_PICKS,
+    TEST_MODE
 )
 
 load_dotenv()
@@ -29,9 +33,10 @@ paper = PaperEngine()
 pending_setups = {}
 sent_today = set()
 token_map = {}
+fired_today = set()
 
 
-def get_available_capital():
+def get_capital_status():
     from src.memory.trade_repository import get_open_trades
 
     open_trades = get_open_trades()
@@ -41,11 +46,22 @@ def get_available_capital():
         for t in open_trades
     )
 
-    available = (
-        paper.portfolio.current_capital - deployed
+    total = paper.portfolio.current_capital
+
+    reserve = total * RESERVE_PERCENT
+
+    available = max(
+        0,
+        total - deployed - reserve
     )
 
-    return max(0, available), len(open_trades)
+    return {
+        "total": total,
+        "deployed": deployed,
+        "reserve": reserve,
+        "available": available,
+        "open_count": len(open_trades)
+    }
 
 
 async def handle_decision(
@@ -68,21 +84,20 @@ async def handle_decision(
 
     if action == "YES" and setup:
 
-        # Final capital check at tap time
-        available, open_count = get_available_capital()
+        cap = get_capital_status()
 
-        if open_count >= MAX_OPEN_TRADES:
+        if cap["open_count"] >= MAX_OPEN_TRADES:
             await query.edit_message_text(
                 f"❌ Max trades ({MAX_OPEN_TRADES}) "
-                f"already open. Close one first."
+                f"already open."
             )
             return
 
-        if available < MIN_VIABLE_TRADE:
+        if cap["available"] < MIN_VIABLE_TRADE:
             await query.edit_message_text(
                 f"❌ Insufficient capital.\n"
-                f"Available: ₹{available:,.0f}\n"
-                f"Minimum:   ₹{MIN_VIABLE_TRADE:,.0f}"
+                f"Available: ₹{cap['available']:,.0f}\n"
+                f"Reserve locked: ₹{cap['reserve']:,.0f}"
             )
             return
 
@@ -135,11 +150,30 @@ async def run_scan(application, scan_type="morning"):
 
     bot = application.bot
 
-    # Skip if not a trading day
-    if not is_trading_day():
+    if not is_trading_day() and not TEST_MODE:
         await send_message(
             bot,
             "📅 Market closed today — no scan."
+        )
+        return
+
+    cap = get_capital_status()
+
+    if cap["open_count"] >= MAX_OPEN_TRADES:
+        await send_message(
+            bot,
+            f"📊 Scan skipped — "
+            f"max trades open "
+            f"({cap['open_count']}/{MAX_OPEN_TRADES})."
+        )
+        return
+
+    if cap["available"] < MIN_VIABLE_TRADE:
+        await send_message(
+            bot,
+            f"💰 Scan skipped — "
+            f"available ₹{cap['available']:,.0f} "
+            f"below minimum."
         )
         return
 
@@ -149,31 +183,12 @@ async def run_scan(application, scan_type="morning"):
         "closing": "🌆 Closing"
     }.get(scan_type, "")
 
-    # Check capital and open trades before scanning
-    available, open_count = get_available_capital()
-
-    if open_count >= MAX_OPEN_TRADES:
-        await send_message(
-            bot,
-            f"📊 {label} scan skipped.\n"
-            f"Max trades open ({open_count}/{MAX_OPEN_TRADES})."
-        )
-        return
-
-    if available < MIN_VIABLE_TRADE:
-        await send_message(
-            bot,
-            f"💰 {label} scan skipped.\n"
-            f"Available capital ₹{available:,.0f} "
-            f"below minimum ₹{MIN_VIABLE_TRADE:,.0f}."
-        )
-        return
-
     await send_message(
         bot,
         f"{label} scan starting...\n"
-        f"Capital available: ₹{available:,.0f}\n"
-        f"Open trades: {open_count}/{MAX_OPEN_TRADES}"
+        f"Available: ₹{cap['available']:,.0f} "
+        f"(reserve ₹{cap['reserve']:,.0f} locked)\n"
+        f"Open trades: {cap['open_count']}/{MAX_OPEN_TRADES}"
     )
 
     kite = KiteConnect(
@@ -209,7 +224,7 @@ async def run_scan(application, scan_type="morning"):
             result = scanner.scan(
                 symbol=symbol,
                 candles=candles,
-                available_capital=available
+                available_capital=cap["available"]
             )
             result["current_price"] = (
                 candles[-1]["close"]
@@ -245,33 +260,40 @@ async def run_scan(application, scan_type="morning"):
         )
         return
 
-    # Slots available
-    slots = MAX_OPEN_TRADES - open_count
+    slots = MAX_OPEN_TRADES - cap["open_count"]
 
     strong = [
         r for r in results
         if r["tier"] == "STRONG"
         and r["symbol"] not in sent_today
-    ][:slots]  # Never send more than available slots
+    ]
 
     if not strong:
         await send_message(
             bot,
-            f"{label} scan done. No new STRONG setups."
+            f"{label} scan done. No STRONG setups."
         )
         return
 
+    # Top N to AI
+    top_n = strong[:TOP_N_TO_AI]
+
     await send_message(
         bot,
-        f"🤖 AI analysing {len(strong)} setup(s)..."
+        f"🤖 AI reviewing top {len(top_n)} setups "
+        f"(picking max {MAX_AI_PICKS})..."
     )
 
-    analysed = analyse_setups(strong)
+    analysed = analyse_setups(
+        setups=top_n,
+        available_capital=cap["available"],
+        max_picks=min(MAX_AI_PICKS, slots)
+    )
 
     if not analysed:
         await send_message(
             bot,
-            "🤖 No high-confidence setups this scan."
+            "🤖 AI found no high-confidence setups."
         )
         return
 
@@ -279,8 +301,8 @@ async def run_scan(application, scan_type="morning"):
 
     await send_message(
         bot,
-        f"{label} scan done — "
-        f"{len(analysed)} setup(s) found.\n"
+        f"{label} done — "
+        f"{len(analysed)} setup(s) selected.\n"
         f"AI calls today: {costs['today_calls']}"
     )
 
@@ -301,59 +323,83 @@ async def run_eod_summary(bot):
     closed_today = [
         t for t in get_closed_trades()
         if t.exit_time
-        and t.exit_time.date() == datetime.utcnow().date()
+        and t.exit_time.date() ==
+        datetime.utcnow().date()
     ]
 
     total_pnl = sum(
         t.pnl for t in closed_today if t.pnl
     )
 
+    total_unrealised = sum(
+        (
+            (t.last_known_price or t.entry_price)
+            - t.entry_price
+        ) * t.quantity
+        for t in open_trades
+    )
+
     costs = get_cost_summary()
-    available, _ = get_available_capital()
+    cap = get_capital_status()
 
     await send_message(
         bot,
         f"📋 *End of Day Summary*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"Open trades:    {len(open_trades)}\n"
-        f"Closed today:   {len(closed_today)}\n"
-        f"Today P&L:      ₹{total_pnl:,.0f}\n"
-        f"Available:      ₹{available:,.0f}\n"
+        f"Open trades:      {len(open_trades)}\n"
+        f"Closed today:     {len(closed_today)}\n"
+        f"Realised P&L:     ₹{total_pnl:,.0f}\n"
+        f"Unrealised P&L:   ₹{round(total_unrealised, 0):,.0f}\n"
+        f"Available:        ₹{cap['available']:,.0f}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"AI calls today: {costs['today_calls']}\n"
-        f"AI calls month: {costs['month_calls']}\n"
+        f"AI calls today:   {costs['today_calls']}\n"
+        f"AI calls month:   {costs['month_calls']}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Bot shutting down. See you tomorrow 🌙"
     )
 
 
 async def scheduler(application):
-    global sent_today
-    fired = set()
+    global sent_today, fired_today
 
     while True:
+
         now = datetime.now()
+        today = now.date().isoformat()
         key = now.strftime("%H:%M")
 
-        if key == "00:00" and "reset" not in fired:
+        # Reset at midnight
+        if today not in fired_today:
             sent_today.clear()
-            fired.clear()
-            fired.add("reset")
+            fired_today.clear()
+            fired_today.add(today)
 
-        if key == "08:45" and "morning" not in fired:
-            fired.add("morning")
+        if (
+            key == "08:45"
+            and "morning" not in fired_today
+        ):
+            fired_today.add("morning")
             await run_scan(application, "morning")
 
-        elif key == "12:00" and "midday" not in fired:
-            fired.add("midday")
+        elif (
+            key == "12:00"
+            and "midday" not in fired_today
+        ):
+            fired_today.add("midday")
             await run_scan(application, "midday")
 
-        elif key == "15:00" and "closing" not in fired:
-            fired.add("closing")
+        elif (
+            key == "15:00"
+            and "closing" not in fired_today
+        ):
+            fired_today.add("closing")
             await run_scan(application, "closing")
 
-        elif key == "15:30" and "eod" not in fired:
-            fired.add("eod")
+        elif (
+            key == "15:30"
+            and "eod" not in fired_today
+        ):
+            fired_today.add("eod")
             await run_eod_summary(application.bot)
 
         await asyncio.sleep(30)
@@ -363,12 +409,50 @@ async def post_init(application: Application):
     from src.monitor.position_monitor import run_monitor
 
     asyncio.create_task(scheduler(application))
-
     asyncio.create_task(
         run_monitor(application.bot, token_map)
     )
 
-    await run_scan(application, "morning")
+    # Smart startup — run appropriate scan
+    # based on what time bot is started
+    now = datetime.now()
+    hour = now.hour
+
+    if not is_trading_day() and not TEST_MODE:
+        await send_message(
+            application.bot,
+            "📅 Market closed today.\n"
+            "Monitoring open positions only.\n"
+            "Next scan on next trading day."
+        )
+        return
+
+    if hour < 8:
+        await send_message(
+            application.bot,
+            "🤖 Bot ready.\n"
+            "Morning scan will run at 8:45 AM."
+        )
+
+    elif hour < 12:
+        fired_today.add("morning")
+        await run_scan(application, "morning")
+
+    elif hour < 15:
+        fired_today.add("morning")
+        fired_today.add("midday")
+        await run_scan(application, "midday")
+
+    else:
+        fired_today.add("morning")
+        fired_today.add("midday")
+        fired_today.add("closing")
+        await send_message(
+            application.bot,
+            "🌆 Started after market hours.\n"
+            "Monitoring open positions.\n"
+            "Next scan tomorrow at 8:45 AM."
+        )
 
 
 def main():
