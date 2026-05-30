@@ -133,7 +133,6 @@ async def handle_decision(
         now = datetime.now().strftime("%d %b %H:%M")
 
         if MODE == "live":
-            # Real order — place on Zerodha then verify
             from kiteconnect import KiteConnect
             kite = KiteConnect(
                 api_key=os.getenv("KITE_API_KEY")
@@ -147,21 +146,24 @@ async def handle_decision(
                     variety=kite.VARIETY_REGULAR,
                     exchange=kite.EXCHANGE_NSE,
                     tradingsymbol=symbol,
-                    transaction_type=kite.TRANSACTION_TYPE_BUY,
+                    transaction_type=(
+                        kite.TRANSACTION_TYPE_BUY
+                    ),
                     quantity=setup["shares_to_buy"],
                     product=kite.PRODUCT_CNC,
                     order_type=kite.ORDER_TYPE_MARKET
                 )
 
-                # Wait briefly for order to process
                 await asyncio.sleep(3)
 
-                # Verify order on Zerodha
                 verified = verify_zerodha_order(
                     kite, order_id
                 )
 
-                if verified and verified["status"] == "COMPLETE":
+                if (
+                    verified
+                    and verified["status"] == "COMPLETE"
+                ):
                     actual_price = verified["avg_price"]
                     actual_qty = verified["filled_qty"]
 
@@ -172,7 +174,6 @@ async def handle_decision(
                         entry_reason=(
                             f"score={setup['score']} "
                             f"rsi={setup['rsi']} "
-                            f"ai={setup.get('ai_confidence', 'N/A')} "
                             f"order_id={order_id}"
                         ),
                         atr=setup["atr"],
@@ -183,7 +184,7 @@ async def handle_decision(
                         f"✅ *LIVE ORDER CONFIRMED*\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
                         f"#{trade.id} {symbol}\n"
-                        f"Zerodha Order: {order_id}\n"
+                        f"Zerodha ID: {order_id}\n"
                         f"Status:  COMPLETE ✅\n"
                         f"Entry:   ₹{actual_price}\n"
                         f"Shares:  {actual_qty}\n"
@@ -195,10 +196,10 @@ async def handle_decision(
 
                 elif verified:
                     await query.edit_message_text(
-                        f"⚠️ *ORDER PLACED — NOT FILLED YET*\n"
+                        f"⚠️ *ORDER PLACED — NOT FILLED*\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
                         f"{symbol}\n"
-                        f"Zerodha Order: {order_id}\n"
+                        f"Zerodha ID: {order_id}\n"
                         f"Status: {verified['status']}\n"
                         f"Check Zerodha app to confirm.\n"
                         f"Placed: {now}",
@@ -207,12 +208,12 @@ async def handle_decision(
 
                 else:
                     await query.edit_message_text(
-                        f"⚠️ *ORDER PLACED — VERIFY MANUALLY*\n"
+                        f"⚠️ *VERIFY MANUALLY*\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
                         f"{symbol}\n"
-                        f"Zerodha Order ID: {order_id}\n"
+                        f"Zerodha ID: {order_id}\n"
                         f"Could not confirm status.\n"
-                        f"Check Zerodha app immediately.\n"
+                        f"Check Zerodha app now.\n"
                         f"Placed: {now}",
                         parse_mode="Markdown"
                     )
@@ -223,13 +224,11 @@ async def handle_decision(
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"{symbol}\n"
                     f"Error: {str(e)}\n"
-                    f"No order placed on Zerodha.\n"
-                    f"Check your account."
+                    f"Nothing placed on Zerodha."
                 )
                 return
 
         else:
-            # Paper trade — just log it
             trade = paper.open_position(
                 symbol=symbol,
                 entry_price=setup["current_price"],
@@ -285,7 +284,8 @@ async def run_scan(application, scan_type="morning"):
     if not is_trading_day() and not TEST_MODE:
         await send_message(
             bot,
-            "📅 Market closed today — no scan."
+            "📅 Market closed today — no scan.\n"
+            "Use /scan to force one."
         )
         return
 
@@ -319,8 +319,8 @@ async def run_scan(application, scan_type="morning"):
         bot,
         f"{label} scan starting...\n"
         f"Available: ₹{cap['available']:,.0f} "
-        f"(reserve ₹{cap['reserve']:,.0f} locked)\n"
-        f"Open trades: {cap['open_count']}/{MAX_OPEN_TRADES}"
+        f"(₹{cap['reserve']:,.0f} reserved)\n"
+        f"Trades: {cap['open_count']}/{MAX_OPEN_TRADES}"
     )
 
     kite = KiteConnect(
@@ -464,7 +464,7 @@ async def run_scan(application, scan_type="morning"):
     await send_message(
         bot,
         f"🤖 AI reviewing {len(top_n)} setups "
-        f"(max {MAX_AI_PICKS} picks)..."
+        f"(max {min(MAX_AI_PICKS, slots)} picks)..."
     )
 
     analysed = analyse_setups(
@@ -479,7 +479,7 @@ async def run_scan(application, scan_type="morning"):
             bot,
             f"🤖 AI reviewed: {', '.join(symbols)}\n"
             f"❌ AI: None met conviction threshold.\n"
-            f"Scanner found {len(strong)} STRONG "
+            f"Scanner: {len(strong)} STRONG found\n"
             f"but AI rejected all."
         )
         return
@@ -635,8 +635,8 @@ async def post_init(application: Application):
         await send_message(
             application.bot,
             f"🤖 Bot ready.\n"
-            f"Morning scan at {MORNING_SCAN_TIME}\n"
-            f"(after market opens at 9:15 AM)\n"
+            f"Morning scan fires at "
+            f"{MORNING_SCAN_TIME}\n"
             f"Or use /scan to run now."
         )
 
@@ -657,7 +657,8 @@ async def post_init(application: Application):
             application.bot,
             f"🌆 Started after market hours.\n"
             f"Monitoring open positions.\n"
-            f"Next scan tomorrow at {MORNING_SCAN_TIME}.\n"
+            f"Next scan tomorrow at "
+            f"{MORNING_SCAN_TIME}.\n"
             f"Use /status to check positions."
         )
 
