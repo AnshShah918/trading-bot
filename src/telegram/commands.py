@@ -12,9 +12,43 @@ from src.memory.trade_repository import (
 )
 from src.portfolio.portfolio_manager import PortfolioManager
 from src.utils.cost_calculator import calculate_trade_costs
-from src.utils.trading_calendar import is_t1_ready
+from src.utils.trading_calendar import is_t1_ready, is_trading_day
 
 portfolio = PortfolioManager()
+
+
+async def cmd_help(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    await update.message.reply_text(
+        "🤖 *Bot Commands*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "📊 */status*\n"
+        "Open trades with live P&L,\n"
+        "stop loss and T+1 status\n\n"
+        "💼 */portfolio*\n"
+        "Full capital summary —\n"
+        "realised + unrealised P&L,\n"
+        "tax reserve, charges\n\n"
+        "🔍 */scan*\n"
+        "Manually trigger a scan\n"
+        "right now (any time)\n\n"
+        "❌ */close 42 512.50*\n"
+        "Manually close trade #42\n"
+        "at exit price ₹512.50\n\n"
+        "⏸ */pause*\n"
+        "Stop bot opening new trades\n"
+        "(monitoring continues)\n\n"
+        "▶️ */resume*\n"
+        "Allow new trades again\n\n"
+        "❓ */help*\n"
+        "This message\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "💡 All trades are PAPER only.\n"
+        "No real orders placed.",
+        parse_mode="Markdown"
+    )
 
 
 async def cmd_status(
@@ -29,8 +63,15 @@ async def cmd_status(
         )
         return
 
+    market_open = is_trading_day()
+    price_note = (
+        "live prices"
+        if market_open
+        else "last known prices — market closed"
+    )
+
     lines = [
-        "📊 *Open Trades*\n"
+        f"📊 *Open Trades* ({price_note})\n"
         "━━━━━━━━━━━━━━━━━━"
     ]
 
@@ -42,7 +83,7 @@ async def cmd_status(
             datetime.utcnow() - t.entry_time
         ).days if t.entry_time else 0
 
-        t1_ready = (
+        t1_status = (
             "✅ T+1 ready"
             if is_t1_ready(t.entry_time)
             else "⏳ T+1 pending"
@@ -70,13 +111,13 @@ async def cmd_status(
         lines.append(
             f"\n*#{t.id} {t.symbol}*\n"
             f"Entry:       ₹{t.entry_price} "
-            f"× {t.quantity}\n"
+            f"× {t.quantity} shares\n"
             f"Last price:  ₹{last_price}\n"
             f"Unrealised:  {emoji} "
             f"₹{round(unrealised, 0):,.0f} "
             f"({round(unrealised_pct, 2)}%)\n"
             f"Stop:        ₹{round(t.current_stop, 2) if t.current_stop else 'N/A'}\n"
-            f"Held:        {hold_days}d — {t1_ready}"
+            f"Held:        {hold_days}d — {t1_status}"
         )
 
     total_emoji = "📈" if total_unrealised >= 0 else "📉"
@@ -84,7 +125,8 @@ async def cmd_status(
     lines.append(
         f"\n━━━━━━━━━━━━━━━━━━\n"
         f"Total unrealised: "
-        f"{total_emoji} ₹{round(total_unrealised, 0):,.0f}"
+        f"{total_emoji} ₹{round(total_unrealised, 0):,.0f}\n"
+        f"📝 Paper trades only"
     )
 
     await update.message.reply_text(
@@ -148,21 +190,23 @@ async def cmd_portfolio(
     await update.message.reply_text(
         f"💼 *Portfolio Summary*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"Capital:      ₹{portfolio.current_capital:,.0f}\n"
-        f"Deployed:     ₹{deployed:,.0f}\n"
-        f"Base:         ₹{portfolio.base_capital:,.0f}\n"
-        f"Booked:       ₹{portfolio.booked_profit:,.0f}\n"
-        f"Mode:         {mode}\n"
+        f"Capital:        ₹{portfolio.current_capital:,.0f}\n"
+        f"Deployed:       ₹{deployed:,.0f}\n"
+        f"Base:           ₹{portfolio.base_capital:,.0f}\n"
+        f"Booked profit:  ₹{portfolio.booked_profit:,.0f}\n"
+        f"Mode:           {mode}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Realised P&L:   ₹{total_realised:,.0f}\n"
         f"Unrealised P&L: ₹{round(total_unrealised, 0):,.0f}\n"
         f"Charges:        ₹{total_charges:,.0f}\n"
         f"Tax reserve:    ₹{tax_reserve:,.0f}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"STCG trades:  {stcg}\n"
-        f"LTCG trades:  {ltcg}\n"
-        f"Open:         {len(open_trades)}\n"
-        f"Closed:       {len(closed)}",
+        f"STCG trades:    {stcg}\n"
+        f"LTCG trades:    {ltcg}\n"
+        f"Open:           {len(open_trades)}\n"
+        f"Closed:         {len(closed)}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Paper trades only",
         parse_mode="Markdown"
     )
 
@@ -228,7 +272,8 @@ async def cmd_close(
         f"Charges:   ₹{costs['charges']}\n"
         f"Net P&L:   ₹{costs['net_pnl']:,.0f}\n"
         f"Tax type:  {tax_type}\n"
-        f"Reserve:   ₹{costs['estimated_tax_reserve']:,.0f}",
+        f"Reserve:   ₹{costs['estimated_tax_reserve']:,.0f}\n"
+        f"📝 Paper trade only",
         parse_mode="Markdown"
     )
 
@@ -238,7 +283,9 @@ async def cmd_pause(
     context: ContextTypes.DEFAULT_TYPE
 ):
     await update.message.reply_text(
-        "⏸ Bot paused. No new trades will open.\n"
+        "⏸ Bot paused.\n"
+        "No new trades will open.\n"
+        "Monitoring continues.\n"
         "Send /resume to restart."
     )
     context.bot_data["paused"] = True
@@ -255,6 +302,7 @@ async def cmd_resume(
 
 
 def register_commands(app):
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("close", cmd_close))

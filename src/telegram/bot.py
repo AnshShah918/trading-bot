@@ -8,6 +8,7 @@ from telegram import Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes
 )
 
@@ -26,7 +27,8 @@ from src.config.settings import (
     MORNING_SCAN_TIME,
     MIDDAY_SCAN_TIME,
     CLOSING_SCAN_TIME,
-    EOD_TIME
+    EOD_TIME,
+    MODE
 )
 
 load_dotenv()
@@ -71,6 +73,26 @@ def get_live_price(kite, symbol):
         return None
 
 
+def verify_zerodha_order(kite, order_id):
+    try:
+        orders = kite.orders()
+        for order in orders:
+            if str(order["order_id"]) == str(order_id):
+                return {
+                    "status": order["status"],
+                    "filled_qty": order.get(
+                        "filled_quantity", 0
+                    ),
+                    "avg_price": order.get(
+                        "average_price", 0
+                    )
+                }
+        return None
+    except Exception as e:
+        print(f"Order verify error: {e}")
+        return None
+
+
 async def handle_decision(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -108,30 +130,133 @@ async def handle_decision(
             )
             return
 
-        trade = paper.open_position(
-            symbol=symbol,
-            entry_price=setup["current_price"],
-            quantity=setup["shares_to_buy"],
-            entry_reason=(
-                f"score={setup['score']} "
-                f"rsi={setup['rsi']} "
-                f"ai={setup.get('ai_confidence', 'N/A')}"
-            ),
-            atr=setup["atr"],
-            current_stop=setup["suggested_stop"]
-        )
+        now = datetime.now().strftime("%d %b %H:%M")
 
-        await query.edit_message_text(
-            f"✅ *{symbol}* — Trade Opened\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"Entry:   ₹{setup['current_price']}\n"
-            f"Target:  ₹{setup['target_price']}\n"
-            f"Stop:    ₹{setup['suggested_stop']}\n"
-            f"Shares:  {setup['shares_to_buy']}\n"
-            f"Capital: ₹{setup['trade_value']}\n"
-            f"Trade ID: #{trade.id}",
-            parse_mode="Markdown"
-        )
+        if MODE == "live":
+            # Real order — place on Zerodha then verify
+            from kiteconnect import KiteConnect
+            kite = KiteConnect(
+                api_key=os.getenv("KITE_API_KEY")
+            )
+            kite.set_access_token(
+                os.getenv("KITE_ACCESS_TOKEN")
+            )
+
+            try:
+                order_id = kite.place_order(
+                    variety=kite.VARIETY_REGULAR,
+                    exchange=kite.EXCHANGE_NSE,
+                    tradingsymbol=symbol,
+                    transaction_type=kite.TRANSACTION_TYPE_BUY,
+                    quantity=setup["shares_to_buy"],
+                    product=kite.PRODUCT_CNC,
+                    order_type=kite.ORDER_TYPE_MARKET
+                )
+
+                # Wait briefly for order to process
+                await asyncio.sleep(3)
+
+                # Verify order on Zerodha
+                verified = verify_zerodha_order(
+                    kite, order_id
+                )
+
+                if verified and verified["status"] == "COMPLETE":
+                    actual_price = verified["avg_price"]
+                    actual_qty = verified["filled_qty"]
+
+                    trade = paper.open_position(
+                        symbol=symbol,
+                        entry_price=actual_price,
+                        quantity=actual_qty,
+                        entry_reason=(
+                            f"score={setup['score']} "
+                            f"rsi={setup['rsi']} "
+                            f"ai={setup.get('ai_confidence', 'N/A')} "
+                            f"order_id={order_id}"
+                        ),
+                        atr=setup["atr"],
+                        current_stop=setup["suggested_stop"]
+                    )
+
+                    await query.edit_message_text(
+                        f"✅ *LIVE ORDER CONFIRMED*\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"#{trade.id} {symbol}\n"
+                        f"Zerodha Order: {order_id}\n"
+                        f"Status:  COMPLETE ✅\n"
+                        f"Entry:   ₹{actual_price}\n"
+                        f"Shares:  {actual_qty}\n"
+                        f"Target:  ₹{setup['target_price']}\n"
+                        f"Stop:    ₹{setup['suggested_stop']}\n"
+                        f"Placed:  {now}",
+                        parse_mode="Markdown"
+                    )
+
+                elif verified:
+                    await query.edit_message_text(
+                        f"⚠️ *ORDER PLACED — NOT FILLED YET*\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"{symbol}\n"
+                        f"Zerodha Order: {order_id}\n"
+                        f"Status: {verified['status']}\n"
+                        f"Check Zerodha app to confirm.\n"
+                        f"Placed: {now}",
+                        parse_mode="Markdown"
+                    )
+
+                else:
+                    await query.edit_message_text(
+                        f"⚠️ *ORDER PLACED — VERIFY MANUALLY*\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"{symbol}\n"
+                        f"Zerodha Order ID: {order_id}\n"
+                        f"Could not confirm status.\n"
+                        f"Check Zerodha app immediately.\n"
+                        f"Placed: {now}",
+                        parse_mode="Markdown"
+                    )
+
+            except Exception as e:
+                await query.edit_message_text(
+                    f"❌ *ORDER FAILED*\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"{symbol}\n"
+                    f"Error: {str(e)}\n"
+                    f"No order placed on Zerodha.\n"
+                    f"Check your account."
+                )
+                return
+
+        else:
+            # Paper trade — just log it
+            trade = paper.open_position(
+                symbol=symbol,
+                entry_price=setup["current_price"],
+                quantity=setup["shares_to_buy"],
+                entry_reason=(
+                    f"score={setup['score']} "
+                    f"rsi={setup['rsi']} "
+                    f"ai={setup.get('ai_confidence', 'N/A')}"
+                ),
+                atr=setup["atr"],
+                current_stop=setup["suggested_stop"]
+            )
+
+            await query.edit_message_text(
+                f"📝 *PAPER TRADE LOGGED*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"#{trade.id} {symbol}\n"
+                f"Entry:   ₹{setup['current_price']}\n"
+                f"Target:  ₹{setup['target_price']}\n"
+                f"Stop:    ₹{setup['suggested_stop']}\n"
+                f"Shares:  {setup['shares_to_buy']}\n"
+                f"Capital: ₹{setup['trade_value']}\n"
+                f"Logged:  {now}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⚠️ No real order placed.",
+                parse_mode="Markdown"
+            )
 
         del pending_setups[symbol]
 
@@ -186,7 +311,8 @@ async def run_scan(application, scan_type="morning"):
     label = {
         "morning": "🌅 Morning",
         "midday": "☀️ Mid-day",
-        "closing": "🌆 Closing"
+        "closing": "🌆 Closing",
+        "manual": "🔍 Manual"
     }.get(scan_type, "")
 
     await send_message(
@@ -234,7 +360,6 @@ async def run_scan(application, scan_type="morning"):
                 available_capital=cap["available"]
             )
 
-            # Use live price instead of yesterday's close
             live_price = get_live_price(kite, symbol)
 
             result["current_price"] = (
@@ -243,7 +368,6 @@ async def run_scan(application, scan_type="morning"):
                 else candles[-1]["close"]
             )
 
-            # Recalculate stop and target from live price
             if live_price:
                 atr = result["atr"]
                 stop = round(
@@ -253,27 +377,24 @@ async def run_scan(application, scan_type="morning"):
                 target = round(
                     live_price + (risk * 2), 2
                 )
-                risk_pct = round(
+                result["suggested_stop"] = stop
+                result["target_price"] = target
+                result["risk_pct"] = round(
                     risk / live_price * 100, 2
                 )
-                target_pct = round(
+                result["target_pct"] = round(
                     (target - live_price)
                     / live_price * 100, 2
                 )
-
-                result["suggested_stop"] = stop
-                result["target_price"] = target
-                result["risk_pct"] = risk_pct
-                result["target_pct"] = target_pct
-                result["risk_per_share"] = round(risk, 2)
-
-                # Recalculate shares from live price
+                result["risk_per_share"] = round(
+                    risk, 2
+                )
                 if cap["available"] > 0:
-                    position_capital = (
+                    pos_capital = (
                         cap["available"] * 0.25
                     )
                     result["shares_to_buy"] = int(
-                        position_capital / live_price
+                        pos_capital / live_price
                     )
                     result["trade_value"] = round(
                         result["shares_to_buy"]
@@ -321,9 +442,20 @@ async def run_scan(application, scan_type="morning"):
     ]
 
     if not strong:
+        best = (
+            max(results, key=lambda x: x["score"])
+            if results else None
+        )
+        best_note = (
+            f"Best score: {best['score']} "
+            f"({best['symbol']})"
+            if best else ""
+        )
         await send_message(
             bot,
-            f"{label} scan done. No STRONG setups."
+            f"{label} scan done.\n"
+            f"❌ Scanner: No STRONG setups.\n"
+            f"{best_note}"
         )
         return
 
@@ -331,8 +463,8 @@ async def run_scan(application, scan_type="morning"):
 
     await send_message(
         bot,
-        f"🤖 AI reviewing top {len(top_n)} setups "
-        f"(picking max {MAX_AI_PICKS})..."
+        f"🤖 AI reviewing {len(top_n)} setups "
+        f"(max {MAX_AI_PICKS} picks)..."
     )
 
     analysed = analyse_setups(
@@ -342,9 +474,13 @@ async def run_scan(application, scan_type="morning"):
     )
 
     if not analysed:
+        symbols = [s["symbol"] for s in top_n]
         await send_message(
             bot,
-            "🤖 AI found no high-confidence setups."
+            f"🤖 AI reviewed: {', '.join(symbols)}\n"
+            f"❌ AI: None met conviction threshold.\n"
+            f"Scanner found {len(strong)} STRONG "
+            f"but AI rejected all."
         )
         return
 
@@ -400,7 +536,8 @@ async def run_eod_summary(bot):
         f"Open trades:      {len(open_trades)}\n"
         f"Closed today:     {len(closed_today)}\n"
         f"Realised P&L:     ₹{total_pnl:,.0f}\n"
-        f"Unrealised P&L:   ₹{round(total_unrealised, 0):,.0f}\n"
+        f"Unrealised P&L:   "
+        f"₹{round(total_unrealised, 0):,.0f}\n"
         f"Available:        ₹{cap['available']:,.0f}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"AI calls today:   {costs['today_calls']}\n"
@@ -408,6 +545,23 @@ async def run_eod_summary(bot):
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Bot shutting down. See you tomorrow 🌙"
     )
+
+
+async def cmd_scan(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if context.bot_data.get("paused"):
+        await update.message.reply_text(
+            "⏸ Bot is paused. Send /resume first."
+        )
+        return
+
+    await update.message.reply_text(
+        "🔍 Manual scan triggered..."
+    )
+
+    await run_scan(context.application, "manual")
 
 
 async def scheduler(application):
@@ -466,46 +620,45 @@ async def post_init(application: Application):
     now = datetime.now()
     hour = now.hour
     minute = now.minute
-    current_time = now.strftime("%H:%M")
 
     if not is_trading_day() and not TEST_MODE:
         await send_message(
             application.bot,
             "📅 Market closed today.\n"
-            "Monitoring open positions only."
+            "Monitoring open positions only.\n"
+            "Use /status to check positions.\n"
+            "Use /scan to force a scan."
         )
         return
 
-    # Before market opens
     if hour < 9 or (hour == 9 and minute < 20):
         await send_message(
             application.bot,
             f"🤖 Bot ready.\n"
-            f"Morning scan at {MORNING_SCAN_TIME} AM\n"
-            f"(after market opens at 9:15 AM)"
+            f"Morning scan at {MORNING_SCAN_TIME}\n"
+            f"(after market opens at 9:15 AM)\n"
+            f"Or use /scan to run now."
         )
 
-    # Market hours — morning window
     elif hour < 12:
         fired_today.add("morning")
         await run_scan(application, "morning")
 
-    # Mid-day window
     elif hour < 15:
         fired_today.add("morning")
         fired_today.add("midday")
         await run_scan(application, "midday")
 
-    # After market
     else:
         fired_today.add("morning")
         fired_today.add("midday")
         fired_today.add("closing")
         await send_message(
             application.bot,
-            "🌆 Started after market hours.\n"
-            "Monitoring open positions.\n"
-            f"Next scan tomorrow at {MORNING_SCAN_TIME} AM."
+            f"🌆 Started after market hours.\n"
+            f"Monitoring open positions.\n"
+            f"Next scan tomorrow at {MORNING_SCAN_TIME}.\n"
+            f"Use /status to check positions."
         )
 
 
@@ -522,17 +675,27 @@ def main():
         CallbackQueryHandler(handle_decision)
     )
 
+    app.add_handler(
+        CommandHandler("scan", cmd_scan)
+    )
+
     register_commands(app)
 
-    print("Bot running.")
+    mode_label = (
+        "🔴 LIVE TRADING"
+        if MODE == "live"
+        else "📝 PAPER TRADING"
+    )
+
+    print(f"Bot running — {mode_label}")
     print(
-        f"Scans: {MORNING_SCAN_TIME} AM | "
-        f"{MIDDAY_SCAN_TIME} PM | "
-        f"{CLOSING_SCAN_TIME} PM IST"
+        f"Scans: {MORNING_SCAN_TIME} | "
+        f"{MIDDAY_SCAN_TIME} | "
+        f"{CLOSING_SCAN_TIME} IST"
     )
     print(
-        "Commands: /status /portfolio "
-        "/close /pause /resume"
+        "Commands: /help /scan /status "
+        "/portfolio /close /pause /resume"
     )
 
     app.run_polling()
