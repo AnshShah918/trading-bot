@@ -15,6 +15,11 @@ from src.portfolio.portfolio_manager import PortfolioManager
 from src.indicators.market_indicators import MarketIndicators
 from src.utils.cost_calculator import calculate_trade_costs
 from src.utils.trading_calendar import is_t1_ready
+from src.monitor.sell_manager import (
+    execute_sell_with_failsafe,
+    process_queued_sells,
+    get_current_bid
+)
 from src.config.settings import (
     NIFTY_CIRCUIT_BREAKER_PCT,
     MONITOR_INTERVAL_MARKET,
@@ -28,7 +33,6 @@ portfolio = PortfolioManager()
 
 MIN_PROFIT_RS = 1500
 MIN_PROFIT_PCT = 8.0
-NIFTY_TOKEN = 256265
 
 _token_map = {}
 
@@ -56,8 +60,6 @@ def ensure_token_map(kite, token_map_ref):
 
 
 def get_live_price(kite, symbol):
-    # Uses quote API — reflects current market price
-    # not yesterday's close
     try:
         quote = kite.quote(f"NSE:{symbol}")
         return quote[f"NSE:{symbol}"]["last_price"]
@@ -67,12 +69,9 @@ def get_live_price(kite, symbol):
 
 
 def get_candles_for_indicators(kite, token):
-    # Still need candles for ATR and trend check
-    # but NOT for current price
     try:
         to_date = datetime.now()
         from_date = to_date - timedelta(days=60)
-
         return kite.historical_data(
             instrument_token=token,
             from_date=from_date,
@@ -82,22 +81,6 @@ def get_candles_for_indicators(kite, token):
     except Exception as e:
         print(f"Candle fetch error: {e}")
         return []
-
-
-def place_sell_order(kite, symbol, quantity):
-    try:
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NSE,
-            tradingsymbol=symbol,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=quantity,
-            product=kite.PRODUCT_CNC,
-            order_type=kite.ORDER_TYPE_MARKET
-        )
-        return order_id, None
-    except Exception as e:
-        return None, str(e)
 
 
 def check_trend(candles):
@@ -112,9 +95,10 @@ def check_nifty_circuit(kite):
     try:
         quote = kite.quote("NSE:NIFTY 50")
         data = quote.get("NSE:NIFTY 50", {})
-
         current = data.get("last_price", 0)
-        prev_close = data.get("ohlc", {}).get("close", 0)
+        prev_close = data.get(
+            "ohlc", {}
+        ).get("close", 0)
 
         if not prev_close:
             return False, 0.0
@@ -130,7 +114,7 @@ def check_nifty_circuit(kite):
         )
 
     except Exception as e:
-        print(f"Nifty circuit check error: {e}")
+        print(f"Nifty check error: {e}")
         return False, 0.0
 
 
@@ -145,15 +129,16 @@ async def refresh_open_positions(bot, token_map):
         return
 
     kite = get_kite()
-    active_map = ensure_token_map(kite, token_map)
 
-    lines = ["🔄 *Positions Refreshed*\n━━━━━━━━━━━━━━━━━━"]
+    lines = [
+        "🔄 *Positions Refreshed*\n"
+        "━━━━━━━━━━━━━━━━━━"
+    ]
 
     total_unrealised = 0
 
     for trade in trades:
 
-        # Use live quote price
         live_price = get_live_price(kite, trade.symbol)
 
         price = (
@@ -176,7 +161,6 @@ async def refresh_open_positions(bot, token_map):
 
         total_unrealised += unrealised
         emoji = "📈" if unrealised >= 0 else "📉"
-
         price_note = (
             "live" if live_price else "last known"
         )
@@ -215,7 +199,10 @@ async def monitor_once(bot, token_map):
     kite = get_kite()
     active_map = ensure_token_map(kite, token_map)
 
-    # Use live quote for Nifty circuit check
+    # Process any queued sells first
+    if MODE == "live":
+        await process_queued_sells(bot)
+
     circuit_hit, nifty_change = (
         check_nifty_circuit(kite)
     )
@@ -243,7 +230,6 @@ async def monitor_once(bot, token_map):
 
         try:
 
-            # Live price via quote — catches intraday moves
             current_price = get_live_price(
                 kite, trade.symbol
             )
@@ -251,10 +237,8 @@ async def monitor_once(bot, token_map):
             if not current_price:
                 continue
 
-            # Update DB immediately
             update_last_price(trade.id, current_price)
 
-            # Candles still needed for ATR + trend
             candles = get_candles_for_indicators(
                 kite, token
             )
@@ -269,7 +253,10 @@ async def monitor_once(bot, token_map):
                 atr=current_atr
             )
 
-            if trade.highest_price and trade.current_stop:
+            if (
+                trade.highest_price
+                and trade.current_stop
+            ):
                 rm.restore(
                     highest_price=trade.highest_price,
                     current_stop=trade.current_stop
@@ -294,79 +281,87 @@ async def monitor_once(bot, token_map):
             # STOP HIT
             if result["stop_hit"] and t1_ready:
 
-                exit_price = current_price
-
                 if MODE == "live":
-                    # Place actual sell order
-                    order_id, error = place_sell_order(
-                        kite,
-                        trade.symbol,
-                        trade.quantity
-                    )
 
-                    if error:
+                    async def on_success(
+                        order_id, price, qty
+                    ):
+                        closed = close_trade(
+                            trade.id,
+                            price,
+                            "stop_loss_hit"
+                        )
+                        costs = calculate_trade_costs(
+                            trade.entry_price
+                            * trade.quantity,
+                            price * trade.quantity,
+                            closed.pnl
+                        )
+                        portfolio.apply_trade_result(
+                            costs["net_pnl"]
+                        )
                         await bot.send_message(
                             chat_id=os.getenv(
                                 "TELEGRAM_CHAT_ID"
                             ),
                             text=(
-                                f"🚨 *STOP HIT — SELL FAILED*\n"
+                                f"✅ *Stop Sell Confirmed*\n"
                                 f"━━━━━━━━━━━━━━━━━━\n"
                                 f"{trade.symbol}\n"
-                                f"Price: ₹{current_price}\n"
-                                f"Stop:  ₹{result['trailing_stop']}\n"
-                                f"Error: {error}\n"
-                                f"⚠️ SELL MANUALLY ON ZERODHA NOW"
+                                f"Exit:    ₹{price}\n"
+                                f"Net P&L: "
+                                f"₹{costs['net_pnl']:,.0f}"
                             ),
                             parse_mode="Markdown"
                         )
-                        continue
 
-                    # Wait for fill
-                    await asyncio.sleep(3)
+                    async def on_failure(msg):
+                        await bot.send_message(
+                            chat_id=os.getenv(
+                                "TELEGRAM_CHAT_ID"
+                            ),
+                            text=(
+                                f"🚨 *STOP SELL FAILED*\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"{trade.symbol}\n"
+                                f"{msg}"
+                            ),
+                            parse_mode="Markdown"
+                        )
 
-                    await bot.send_message(
-                        chat_id=os.getenv(
-                            "TELEGRAM_CHAT_ID"
-                        ),
-                        text=(
-                            f"🔴 *Stop Hit — Sell Placed*\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"{trade.symbol}\n"
-                            f"Zerodha ID: {order_id}\n"
-                            f"Price: ~₹{current_price}\n"
-                            f"Check Zerodha to confirm fill."
-                        ),
-                        parse_mode="Markdown"
+                    await execute_sell_with_failsafe(
+                        bot, trade,
+                        "stop_loss_hit",
+                        on_success,
+                        on_failure
                     )
 
-                closed = close_trade(
-                    trade.id,
-                    exit_price,
-                    "stop_loss_hit"
-                )
-
-                costs = calculate_trade_costs(
-                    trade.entry_price * trade.quantity,
-                    exit_price * trade.quantity,
-                    closed.pnl
-                )
-
-                portfolio.apply_trade_result(
-                    costs["net_pnl"]
-                )
-
-                if MODE == "paper":
+                else:
+                    closed = close_trade(
+                        trade.id,
+                        current_price,
+                        "stop_loss_hit"
+                    )
+                    costs = calculate_trade_costs(
+                        trade.entry_price * trade.quantity,
+                        current_price * trade.quantity,
+                        closed.pnl
+                    )
+                    portfolio.apply_trade_result(
+                        costs["net_pnl"]
+                    )
                     await bot.send_message(
                         chat_id=os.getenv(
                             "TELEGRAM_CHAT_ID"
                         ),
                         text=(
-                            f"🔴 *Stop Hit — {trade.symbol}*\n"
+                            f"🔴 *Stop Hit — "
+                            f"{trade.symbol}*\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"Exit:    ₹{exit_price}\n"
+                            f"Exit:    ₹{current_price}\n"
                             f"Entry:   ₹{trade.entry_price}\n"
-                            f"Net P&L: ₹{costs['net_pnl']:,.0f}\n"
+                            f"Net P&L: "
+                            f"₹{costs['net_pnl']:,.0f}\n"
                             f"📝 Paper trade closed."
                         ),
                         parse_mode="Markdown"
@@ -377,7 +372,6 @@ async def monitor_once(bot, token_map):
             if not t1_ready:
                 continue
 
-            # PROFIT THRESHOLD
             profit_rs = (
                 result["profit_rs"] * trade.quantity
             )
@@ -402,67 +396,86 @@ async def monitor_once(bot, token_map):
                             f"+{profit_pct}% "
                             f"(₹{profit_rs:,.0f})\n"
                             f"Trend intact — holding.\n"
-                            f"Stop → ₹{result['trailing_stop']}"
+                            f"Stop → "
+                            f"₹{result['trailing_stop']}"
                         ),
                         parse_mode="Markdown"
                     )
 
                 else:
 
-                    exit_price = current_price
-
                     if MODE == "live":
-                        order_id, error = place_sell_order(
-                            kite,
-                            trade.symbol,
-                            trade.quantity
-                        )
 
-                        if error:
+                        async def on_success(
+                            order_id, price, qty
+                        ):
+                            closed = close_trade(
+                                trade.id,
+                                price,
+                                "profit_trend_weakening"
+                            )
+                            costs = (
+                                calculate_trade_costs(
+                                    trade.entry_price
+                                    * trade.quantity,
+                                    price * trade.quantity,
+                                    closed.pnl
+                                )
+                            )
+                            portfolio.apply_trade_result(
+                                costs["net_pnl"]
+                            )
                             await bot.send_message(
                                 chat_id=os.getenv(
                                     "TELEGRAM_CHAT_ID"
                                 ),
                                 text=(
-                                    f"🚨 *PROFIT SELL FAILED*\n"
+                                    f"✅ *Profit Sell "
+                                    f"Confirmed*\n"
                                     f"{trade.symbol}\n"
-                                    f"Error: {error}\n"
-                                    f"⚠️ SELL MANUALLY ON ZERODHA"
+                                    f"Exit: ₹{price}\n"
+                                    f"Net P&L: "
+                                    f"₹{costs['net_pnl']:,.0f}"
                                 ),
                                 parse_mode="Markdown"
                             )
-                            continue
 
-                        await bot.send_message(
-                            chat_id=os.getenv(
-                                "TELEGRAM_CHAT_ID"
-                            ),
-                            text=(
-                                f"📤 *Profit Sell Placed*\n"
-                                f"{trade.symbol}\n"
-                                f"Zerodha ID: {order_id}\n"
-                                f"Price: ~₹{current_price}"
-                            ),
-                            parse_mode="Markdown"
+                        async def on_failure(msg):
+                            await bot.send_message(
+                                chat_id=os.getenv(
+                                    "TELEGRAM_CHAT_ID"
+                                ),
+                                text=(
+                                    f"🚨 *PROFIT SELL "
+                                    f"FAILED*\n"
+                                    f"{trade.symbol}\n"
+                                    f"{msg}"
+                                ),
+                                parse_mode="Markdown"
+                            )
+
+                        await execute_sell_with_failsafe(
+                            bot, trade,
+                            "profit_trend_weakening",
+                            on_success,
+                            on_failure
                         )
 
-                    closed = close_trade(
-                        trade.id,
-                        exit_price,
-                        "profit_trend_weakening"
-                    )
-
-                    costs = calculate_trade_costs(
-                        trade.entry_price * trade.quantity,
-                        exit_price * trade.quantity,
-                        closed.pnl
-                    )
-
-                    portfolio.apply_trade_result(
-                        costs["net_pnl"]
-                    )
-
-                    if MODE == "paper":
+                    else:
+                        closed = close_trade(
+                            trade.id,
+                            current_price,
+                            "profit_trend_weakening"
+                        )
+                        costs = calculate_trade_costs(
+                            trade.entry_price
+                            * trade.quantity,
+                            current_price * trade.quantity,
+                            closed.pnl
+                        )
+                        portfolio.apply_trade_result(
+                            costs["net_pnl"]
+                        )
                         await bot.send_message(
                             chat_id=os.getenv(
                                 "TELEGRAM_CHAT_ID"
@@ -471,16 +484,18 @@ async def monitor_once(bot, token_map):
                                 f"📤 *Profit Booked — "
                                 f"{trade.symbol}*\n"
                                 f"━━━━━━━━━━━━━━━━━━\n"
-                                f"Exit:    ₹{exit_price}\n"
-                                f"Net P&L: ₹{costs['net_pnl']:,.0f}\n"
-                                f"Reason:  Trend weakening\n"
+                                f"Exit:    ₹{current_price}\n"
+                                f"Net P&L: "
+                                f"₹{costs['net_pnl']:,.0f}\n"
                                 f"📝 Paper trade closed."
                             ),
                             parse_mode="Markdown"
                         )
 
         except Exception as e:
-            print(f"Monitor error {trade.symbol}: {e}")
+            print(
+                f"Monitor error {trade.symbol}: {e}"
+            )
             continue
 
 
@@ -503,6 +518,10 @@ async def run_monitor(bot, token_map):
 
         if in_market_hours:
             await monitor_once(bot, token_map)
-            await asyncio.sleep(MONITOR_INTERVAL_MARKET)
+            await asyncio.sleep(
+                MONITOR_INTERVAL_MARKET
+            )
         else:
-            await asyncio.sleep(MONITOR_INTERVAL_OUTSIDE)
+            await asyncio.sleep(
+                MONITOR_INTERVAL_OUTSIDE
+            )
