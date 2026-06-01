@@ -27,8 +27,9 @@ portfolio = PortfolioManager()
 
 MIN_PROFIT_RS = 1500
 MIN_PROFIT_PCT = 8.0
-
 NIFTY_TOKEN = 256265
+
+_token_map = {}
 
 
 def get_kite():
@@ -39,6 +40,19 @@ def get_kite():
         os.getenv("KITE_ACCESS_TOKEN")
     )
     return kite
+
+
+def ensure_token_map(kite, token_map_ref):
+    # If token_map passed in is empty, build our own
+    if not token_map_ref:
+        from src.universe.instrument_lookup import (
+            InstrumentLookup
+        )
+        instruments = kite.instruments("NSE")
+        built = InstrumentLookup.build_map(instruments)
+        _token_map.update(built)
+        return _token_map
+    return token_map_ref
 
 
 def check_trend(candles):
@@ -82,6 +96,100 @@ def check_nifty_circuit(kite):
         return False, 0.0
 
 
+def fetch_prices_for_open_trades(kite, token_map):
+    trades = get_open_trades()
+
+    if not trades:
+        return {}
+
+    prices = {}
+
+    for trade in trades:
+        token = token_map.get(trade.symbol)
+        if not token:
+            continue
+        try:
+            to_date = datetime.now()
+            from_date = to_date - timedelta(days=60)
+
+            candles = kite.historical_data(
+                instrument_token=token,
+                from_date=from_date,
+                to_date=to_date,
+                interval="day"
+            )
+
+            if candles:
+                price = candles[-1]["close"]
+                update_last_price(trade.id, price)
+                prices[trade.symbol] = price
+
+        except Exception as e:
+            print(f"Price fetch error {trade.symbol}: {e}")
+
+    return prices
+
+
+async def refresh_open_positions(bot, token_map):
+    trades = get_open_trades()
+
+    if not trades:
+        await bot.send_message(
+            chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+            text="📭 No open positions to refresh."
+        )
+        return
+
+    kite = get_kite()
+    active_map = ensure_token_map(kite, token_map)
+    prices = fetch_prices_for_open_trades(
+        kite, active_map
+    )
+
+    lines = ["🔄 *Positions Refreshed*\n━━━━━━━━━━━━━━━━━━"]
+
+    total_unrealised = 0
+
+    for trade in trades:
+        price = prices.get(
+            trade.symbol,
+            trade.last_known_price or trade.entry_price
+        )
+
+        unrealised = (
+            (price - trade.entry_price) * trade.quantity
+        )
+        unrealised_pct = (
+            (price - trade.entry_price)
+            / trade.entry_price * 100
+        )
+
+        total_unrealised += unrealised
+        emoji = "📈" if unrealised >= 0 else "📉"
+
+        lines.append(
+            f"\n*#{trade.id} {trade.symbol}*\n"
+            f"Entry:  ₹{trade.entry_price}\n"
+            f"Now:    ₹{price}\n"
+            f"P&L:    {emoji} ₹{round(unrealised, 0):,.0f} "
+            f"({round(unrealised_pct, 2)}%)\n"
+            f"Stop:   ₹{round(trade.current_stop, 2) if trade.current_stop else 'N/A'}"
+        )
+
+    total_emoji = "📈" if total_unrealised >= 0 else "📉"
+    lines.append(
+        f"\n━━━━━━━━━━━━━━━━━━\n"
+        f"Total: {total_emoji} "
+        f"₹{round(total_unrealised, 0):,.0f}"
+    )
+
+    await bot.send_message(
+        chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+        text="\n".join(lines),
+        parse_mode="Markdown"
+    )
+
+
 async def monitor_once(bot, token_map):
 
     trades = get_open_trades()
@@ -90,6 +198,7 @@ async def monitor_once(bot, token_map):
         return
 
     kite = get_kite()
+    active_map = ensure_token_map(kite, token_map)
 
     circuit_hit, nifty_change = (
         check_nifty_circuit(kite)
@@ -111,7 +220,7 @@ async def monitor_once(bot, token_map):
 
     for trade in trades:
 
-        token = token_map.get(trade.symbol)
+        token = active_map.get(trade.symbol)
 
         if not token:
             continue
@@ -148,7 +257,6 @@ async def monitor_once(bot, token_map):
                     current_stop=trade.current_stop
                 )
 
-            # Tighten stop on circuit breaker
             if circuit_hit:
                 rm.ATR_MULTIPLIER = 1.0
 
@@ -165,7 +273,6 @@ async def monitor_once(bot, token_map):
 
             t1_ready = is_t1_ready(trade.entry_time)
 
-            # STOP HIT
             if result["stop_hit"] and t1_ready:
 
                 closed = close_trade(
@@ -202,7 +309,6 @@ async def monitor_once(bot, token_map):
             if not t1_ready:
                 continue
 
-            # PROFIT THRESHOLD
             profit_rs = (
                 result["profit_rs"] * trade.quantity
             )

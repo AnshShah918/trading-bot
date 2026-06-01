@@ -332,6 +332,7 @@ async def run_scan(application, scan_type="morning"):
 
     instruments = kite.instruments("NSE")
     token_map = InstrumentLookup.build_map(instruments)
+    application.bot_data["token_map"] = token_map
     watchlist = Nifty500.load()
     scanner = MomentumScanner()
 

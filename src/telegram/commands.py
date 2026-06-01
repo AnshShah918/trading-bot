@@ -42,6 +42,9 @@ async def cmd_help(
         "(monitoring continues)\n\n"
         "▶️ */resume*\n"
         "Allow new trades again\n\n"
+        "🔄 */refresh*\n"
+        "Fetch latest prices for\n"
+        "all open positions now\n\n"
         "❓ */help*\n"
         "This message\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -308,3 +311,26 @@ def register_commands(app):
     app.add_handler(CommandHandler("close", cmd_close))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("refresh", cmd_refresh))
+
+
+async def cmd_refresh(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    await update.message.reply_text(
+        "🔄 Fetching latest prices..."
+    )
+
+    from src.monitor.position_monitor import (
+        refresh_open_positions
+    )
+
+    bot_token_map = context.bot_data.get(
+        "token_map", {}
+    )
+
+    await refresh_open_positions(
+        update.get_bot(),
+        bot_token_map
+    )
