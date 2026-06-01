@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import timezone, datetime
 from telegram import Update
 from telegram.ext import (
     ContextTypes,
@@ -83,7 +83,7 @@ async def cmd_status(
     for t in trades:
 
         hold_days = (
-            datetime.utcnow() - t.entry_time
+            datetime.now(timezone.utc) - t.entry_time
         ).days if t.entry_time else 0
 
         t1_status = (

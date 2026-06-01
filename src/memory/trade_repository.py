@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import timezone, datetime
 from src.memory.db import get_db
 from src.memory.models import Trade
 
@@ -18,7 +18,7 @@ def open_trade(
         quantity=quantity,
         status="open",
         entry_reason=entry_reason,
-        entry_time=datetime.utcnow(),
+        entry_time=datetime.now(timezone.utc),
         current_stop=current_stop,
         highest_price=entry_price,
         last_known_price=entry_price
@@ -46,7 +46,7 @@ def close_trade(
     if trade:
 
         trade.exit_price = exit_price
-        trade.exit_time = datetime.utcnow()
+        trade.exit_time = datetime.now(timezone.utc)
 
         trade.pnl = (
             exit_price - trade.entry_price

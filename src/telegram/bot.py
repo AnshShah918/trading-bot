@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timezone, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
@@ -512,7 +512,7 @@ async def run_eod_summary(bot):
         t for t in get_closed_trades()
         if t.exit_time
         and t.exit_time.date() ==
-        datetime.utcnow().date()
+        datetime.now(timezone.utc).date()
     ]
 
     total_pnl = sum(
