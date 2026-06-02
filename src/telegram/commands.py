@@ -45,6 +45,9 @@ async def cmd_help(
         "🔄 */refresh*\n"
         "Fetch latest prices for\n"
         "all open positions now\n\n"
+        "📰 */news*\n"
+        "Scan todays market news\n"
+        "identifies thematic plays\n\n"
         "❓ */help*\n"
         "This message\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -333,4 +336,53 @@ async def cmd_refresh(
     await refresh_open_positions(
         update.get_bot(),
         bot_token_map
+    )
+
+
+async def cmd_news(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    await update.message.reply_text(
+        "📰 Searching today's market news...\n"
+        "This may take 15-20 seconds."
+    )
+
+    from src.news.thematic_scanner import (
+        get_thematic_alerts,
+        format_theme_message
+    )
+
+    themes, error = get_thematic_alerts()
+
+    if themes is None:
+        await update.message.reply_text(
+            f"❌ News search failed: {error}"
+        )
+        return
+
+    if not themes:
+        await update.message.reply_text(
+            f"📭 {error}\n"
+            f"No major themes identified today."
+        )
+        return
+
+    await update.message.reply_text(
+        f"📰 *{len(themes)} Theme(s) Found Today*\n"
+        f"These are watch alerts — not trade signals.\n"
+        f"Research before acting.",
+        parse_mode="Markdown"
+    )
+
+    for theme in themes:
+        await update.message.reply_text(
+            format_theme_message(theme),
+            parse_mode="Markdown"
+        )
+
+    await update.message.reply_text(
+        "💡 To scan these stocks technically:\n"
+        "Use /scan after verifying the news.\n"
+        "These will appear if momentum builds."
     )
