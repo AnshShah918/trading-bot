@@ -1,4 +1,4 @@
-from datetime import timezone, datetime
+from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import (
     ContextTypes,
@@ -28,31 +28,25 @@ async def cmd_help(
         "Open trades with live P&L,\n"
         "stop loss and T+1 status\n\n"
         "💼 */portfolio*\n"
-        "Full capital summary —\n"
-        "realised + unrealised P&L,\n"
-        "tax reserve, charges\n\n"
+        "Full capital summary\n\n"
         "🔍 */scan*\n"
-        "Manually trigger a scan\n"
-        "right now (any time)\n\n"
+        "Manually trigger a scan now\n\n"
+        "📰 */news*\n"
+        "Todays thematic market themes\n\n"
+        "🔄 */refresh*\n"
+        "Fetch latest prices for open positions\n\n"
         "❌ */close 42 512.50*\n"
-        "Manually close trade #42\n"
-        "at exit price ₹512.50\n\n"
+        "Manually close trade 42 at 512.50\n\n"
+        "✅ */confirm 42 512.50*\n"
+        "Confirm manual sell on Zerodha\n\n"
         "⏸ */pause*\n"
-        "Stop bot opening new trades\n"
-        "(monitoring continues)\n\n"
+        "Stop bot opening new trades\n\n"
         "▶️ */resume*\n"
         "Allow new trades again\n\n"
-        "🔄 */refresh*\n"
-        "Fetch latest prices for\n"
-        "all open positions now\n\n"
-        "📰 */news*\n"
-        "Scan todays market news\n"
-        "identifies thematic plays\n\n"
         "❓ */help*\n"
         "This message\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "💡 All trades are PAPER only.\n"
-        "No real orders placed.",
+        "All trades are PAPER only.",
         parse_mode="Markdown"
     )
 
@@ -73,7 +67,7 @@ async def cmd_status(
     price_note = (
         "live prices"
         if market_open
-        else "last known prices — market closed"
+        else "last known — market closed"
     )
 
     lines = [
@@ -111,18 +105,18 @@ async def cmd_status(
         )
 
         total_unrealised += unrealised
-
         emoji = "📈" if unrealised >= 0 else "📉"
 
         lines.append(
             f"\n*#{t.id} {t.symbol}*\n"
             f"Entry:       ₹{t.entry_price} "
-            f"× {t.quantity} shares\n"
+            f"x {t.quantity} shares\n"
             f"Last price:  ₹{last_price}\n"
             f"Unrealised:  {emoji} "
             f"₹{round(unrealised, 0):,.0f} "
             f"({round(unrealised_pct, 2)}%)\n"
-            f"Stop:        ₹{round(t.current_stop, 2) if t.current_stop else 'N/A'}\n"
+            f"Stop:        "
+            f"₹{round(t.current_stop, 2) if t.current_stop else 'N/A'}\n"
             f"Held:        {hold_days}d — {t1_status}"
         )
 
@@ -171,7 +165,9 @@ async def cmd_portfolio(
                 t.pnl
             )
             total_charges += costs["charges"]
-            tax_reserve += costs["estimated_tax_reserve"]
+            tax_reserve += (
+                costs["estimated_tax_reserve"]
+            )
 
     hold_days_list = [
         (t.exit_time - t.entry_time).days
@@ -184,7 +180,8 @@ async def cmd_portfolio(
 
     mode = (
         "🔴 RECOVERY"
-        if portfolio.current_capital < portfolio.base_capital
+        if portfolio.current_capital
+        < portfolio.base_capital
         else "🟢 NORMAL"
     )
 
@@ -235,7 +232,7 @@ async def cmd_close(
         exit_price = float(args[1])
     except (IndexError, ValueError):
         await update.message.reply_text(
-            "❌ Invalid format.\n"
+            "Invalid format.\n"
             "Usage: /close 42 512.50"
         )
         return
@@ -248,7 +245,7 @@ async def cmd_close(
 
     if not trade:
         await update.message.reply_text(
-            f"❌ Trade #{trade_id} not found."
+            f"Trade {trade_id} not found."
         )
         return
 
@@ -268,7 +265,7 @@ async def cmd_close(
     )
 
     await update.message.reply_text(
-        f"✅ *Trade #{trade_id} Closed*\n"
+        f"✅ *Trade {trade_id} Closed*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Symbol:    {trade.symbol}\n"
         f"Entry:     ₹{trade.entry_price}\n"
@@ -280,6 +277,63 @@ async def cmd_close(
         f"Tax type:  {tax_type}\n"
         f"Reserve:   ₹{costs['estimated_tax_reserve']:,.0f}\n"
         f"📝 Paper trade only",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_confirm(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    args = context.args
+
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /confirm <trade_id> <exit_price>\n"
+            "Example: /confirm 3 245.50\n"
+            "Use after manually selling on Zerodha."
+        )
+        return
+
+    try:
+        trade_id = int(args[0])
+        exit_price = float(args[1])
+    except (IndexError, ValueError):
+        await update.message.reply_text(
+            "Invalid format.\n"
+            "Usage: /confirm 3 245.50"
+        )
+        return
+
+    from src.monitor.sell_manager import _queued_sells
+    _queued_sells.pop(trade_id, None)
+
+    trade = close_trade(
+        trade_id,
+        exit_price,
+        exit_reason="manual_confirm"
+    )
+
+    if not trade:
+        await update.message.reply_text(
+            f"Trade {trade_id} not found."
+        )
+        return
+
+    costs = calculate_trade_costs(
+        trade.entry_price * trade.quantity,
+        exit_price * trade.quantity,
+        trade.pnl
+    )
+
+    await update.message.reply_text(
+        f"✅ *Trade {trade_id} Confirmed*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Symbol:    {trade.symbol}\n"
+        f"Exit:      ₹{exit_price}\n"
+        f"Net P&L:   ₹{costs['net_pnl']:,.0f}\n"
+        f"Charges:   ₹{costs['charges']}\n"
+        f"Removed from pending sells.",
         parse_mode="Markdown"
     )
 
@@ -305,16 +359,6 @@ async def cmd_resume(
     await update.message.reply_text(
         "▶️ Bot resumed. Ready for new trades."
     )
-
-
-def register_commands(app):
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("portfolio", cmd_portfolio))
-    app.add_handler(CommandHandler("close", cmd_close))
-    app.add_handler(CommandHandler("pause", cmd_pause))
-    app.add_handler(CommandHandler("resume", cmd_resume))
-    app.add_handler(CommandHandler("refresh", cmd_refresh))
 
 
 async def cmd_refresh(
@@ -344,7 +388,7 @@ async def cmd_news(
     context: ContextTypes.DEFAULT_TYPE
 ):
     await update.message.reply_text(
-        "📰 Searching today's market news...\n"
+        "📰 Searching todays market news...\n"
         "This may take 15-20 seconds."
     )
 
@@ -357,20 +401,20 @@ async def cmd_news(
 
     if themes is None:
         await update.message.reply_text(
-            f"❌ News search failed: {error}"
+            f"News search failed: {error}"
         )
         return
 
     if not themes:
         await update.message.reply_text(
             f"📭 {error}\n"
-            f"No major themes identified today."
+            f"No major themes today."
         )
         return
 
     await update.message.reply_text(
-        f"📰 *{len(themes)} Theme(s) Found Today*\n"
-        f"These are watch alerts — not trade signals.\n"
+        f"📰 *{len(themes)} Theme(s) Found*\n"
+        f"Watch alerts — not trade signals.\n"
         f"Research before acting.",
         parse_mode="Markdown"
     )
@@ -381,24 +425,49 @@ async def cmd_news(
                 format_theme_message(theme),
                 parse_mode="MarkdownV2"
             )
-        except Exception as e:
-            # Fallback to plain text if formatting fails
+        except Exception:
+            # Fallback plain text
+            stocks = ", ".join(
+                theme.get("stocks", [])
+            )
             await update.message.reply_text(
-                f"{theme.get('theme', '')}
-
-"
-                f"{theme.get('summary', '')}
-
-"
-                f"Stocks: {', '.join(theme.get('stocks', []))}
-"
-                f"Urgency: {theme.get('urgency', '')}
-"
-                f"Verify: {theme.get('source_hint', '')}"
+                f"{theme.get('urgency')} — "
+                f"{theme.get('theme')}\n\n"
+                f"{theme.get('summary')}\n\n"
+                f"Stocks: {stocks}\n"
+                f"Verify: {theme.get('source_hint')}"
             )
 
     await update.message.reply_text(
-        "💡 To scan these stocks technically:\n"
-        "Use /scan after verifying the news.\n"
-        "These will appear if momentum builds."
+        "Use /scan after researching a theme."
+    )
+
+
+def register_commands(app):
+    app.add_handler(
+        CommandHandler("help", cmd_help)
+    )
+    app.add_handler(
+        CommandHandler("status", cmd_status)
+    )
+    app.add_handler(
+        CommandHandler("portfolio", cmd_portfolio)
+    )
+    app.add_handler(
+        CommandHandler("close", cmd_close)
+    )
+    app.add_handler(
+        CommandHandler("confirm", cmd_confirm)
+    )
+    app.add_handler(
+        CommandHandler("pause", cmd_pause)
+    )
+    app.add_handler(
+        CommandHandler("resume", cmd_resume)
+    )
+    app.add_handler(
+        CommandHandler("refresh", cmd_refresh)
+    )
+    app.add_handler(
+        CommandHandler("news", cmd_news)
     )
