@@ -376,10 +376,26 @@ async def cmd_news(
     )
 
     for theme in themes:
-        await update.message.reply_text(
-            format_theme_message(theme),
-            parse_mode="Markdown"
-        )
+        try:
+            await update.message.reply_text(
+                format_theme_message(theme),
+                parse_mode="MarkdownV2"
+            )
+        except Exception as e:
+            # Fallback to plain text if formatting fails
+            await update.message.reply_text(
+                f"{theme.get('theme', '')}
+
+"
+                f"{theme.get('summary', '')}
+
+"
+                f"Stocks: {', '.join(theme.get('stocks', []))}
+"
+                f"Urgency: {theme.get('urgency', '')}
+"
+                f"Verify: {theme.get('source_hint', '')}"
+            )
 
     await update.message.reply_text(
         "💡 To scan these stocks technically:\n"
