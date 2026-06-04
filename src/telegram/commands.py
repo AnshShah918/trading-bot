@@ -80,7 +80,7 @@ async def cmd_status(
     for t in trades:
 
         hold_days = (
-            datetime.now(timezone.utc) - t.entry_time
+            datetime.now() - t.entry_time
         ).days if t.entry_time else 0
 
         t1_status = (
