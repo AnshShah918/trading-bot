@@ -157,3 +157,143 @@ class MarketIndicators:
             /
             len(recent)
         )
+
+    @staticmethod
+    def garch_volatility(
+        candles,
+        min_periods=60
+    ):
+        """
+        Fits GARCH(1,1) on daily returns.
+        Returns predicted next-period volatility.
+        Falls back to simple std dev if GARCH fails.
+        """
+        closes = [
+            c["close"]
+            for c in candles
+        ]
+
+        if len(closes) < min_periods:
+            return None
+
+        try:
+            from arch import arch_model
+            import numpy as np
+            import warnings
+
+            returns = [
+                (closes[i] - closes[i - 1])
+                / closes[i - 1] * 100
+                for i in range(1, len(closes))
+            ]
+
+            returns = np.array(returns)
+
+            # Suppress convergence warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+
+                model = arch_model(
+                    returns,
+                    vol="Garch",
+                    p=1,
+                    q=1,
+                    rescale=False
+                )
+
+                fit = model.fit(
+                    disp="off",
+                    show_warning=False
+                )
+
+                forecast = fit.forecast(horizon=1)
+
+                predicted_var = (
+                    forecast.variance
+                    .values[-1][0]
+                )
+
+                return float(predicted_var ** 0.5)
+
+        except Exception as e:
+            # Fallback to simple std dev
+            try:
+                import numpy as np
+                returns = [
+                    (closes[i] - closes[i - 1])
+                    / closes[i - 1] * 100
+                    for i in range(1, len(closes))
+                ]
+                return float(np.std(returns[-30:]))
+            except Exception:
+                return None
+
+    @staticmethod
+    def garch_volatility(
+        candles,
+        min_periods=60
+    ):
+        """
+        Fits GARCH(1,1) on daily returns.
+        Returns predicted next-period volatility.
+        Falls back to simple std dev if GARCH fails.
+        """
+        closes = [
+            c["close"]
+            for c in candles
+        ]
+
+        if len(closes) < min_periods:
+            return None
+
+        try:
+            from arch import arch_model
+            import numpy as np
+            import warnings
+
+            returns = [
+                (closes[i] - closes[i - 1])
+                / closes[i - 1] * 100
+                for i in range(1, len(closes))
+            ]
+
+            returns = np.array(returns)
+
+            # Suppress convergence warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+
+                model = arch_model(
+                    returns,
+                    vol="Garch",
+                    p=1,
+                    q=1,
+                    rescale=False
+                )
+
+                fit = model.fit(
+                    disp="off",
+                    show_warning=False
+                )
+
+                forecast = fit.forecast(horizon=1)
+
+                predicted_var = (
+                    forecast.variance
+                    .values[-1][0]
+                )
+
+                return float(predicted_var ** 0.5)
+
+        except Exception as e:
+            # Fallback to simple std dev
+            try:
+                import numpy as np
+                returns = [
+                    (closes[i] - closes[i - 1])
+                    / closes[i - 1] * 100
+                    for i in range(1, len(closes))
+                ]
+                return float(np.std(returns[-30:]))
+            except Exception:
+                return None

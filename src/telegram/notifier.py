@@ -21,6 +21,7 @@ def format_setup(result):
         f"RSI:      {result['rsi']}\n"
         f"Momentum: {result['momentum']}\n"
         f"Volume:   {result['volume_ratio']}x avg\n"
+        f"GARCH vol: {result['garch_vol']}%\n" if result.get('garch_vol') else ""
         f"{ai_line}"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Entry:    ₹{result['current_price']}\n"

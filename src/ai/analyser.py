@@ -203,6 +203,8 @@ def analyse_setups(
     setups_text = "\n".join([
         f"{i+1}. {s['symbol']}: "
         f"score={s['score']} "
+        f"risk_adj_score={s.get('risk_adj_score', s['score'])} "
+        f"garch_vol={s.get('garch_vol', 'N/A')}% "
         f"rsi={s['rsi']} "
         f"momentum={s['momentum']} "
         f"volume={s['volume_ratio']}x "

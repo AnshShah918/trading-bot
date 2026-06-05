@@ -7,6 +7,7 @@ from src.config.settings import (
 )
 
 TARGET_RISK_REWARD = 2.0
+MIN_SCORE_FOR_GARCH = 40
 
 
 class MomentumScanner:
@@ -19,48 +20,32 @@ class MomentumScanner:
     ):
 
         recent_high = (
-            MarketIndicators.recent_high(
-                candles
-            )
+            MarketIndicators.recent_high(candles)
         )
 
         avg_volume = (
-            MarketIndicators.average_volume(
-                candles
-            )
+            MarketIndicators.average_volume(candles)
         )
 
         momentum = (
-            MarketIndicators.momentum(
-                candles
-            )
+            MarketIndicators.momentum(candles)
         )
 
         ma20 = (
             MarketIndicators.moving_average(
-                candles,
-                20
+                candles, 20
             )
         )
 
         ma50 = (
             MarketIndicators.moving_average(
-                candles,
-                50
+                candles, 50
             )
         )
 
-        rsi = (
-            MarketIndicators.rsi(
-                candles
-            )
-        )
+        rsi = MarketIndicators.rsi(candles)
 
-        atr = (
-            MarketIndicators.atr(
-                candles
-            )
-        )
+        atr = MarketIndicators.atr(candles)
 
         fifty_two_high = (
             MarketIndicators.fifty_two_week_high(
@@ -102,9 +87,9 @@ class MomentumScanner:
             risk_per_share / current_price * 100
         )
 
-        # Target price — 1:2 risk reward
         target_price = round(
-            current_price + (risk_per_share * TARGET_RISK_REWARD),
+            current_price
+            + (risk_per_share * TARGET_RISK_REWARD),
             2
         )
 
@@ -114,12 +99,12 @@ class MomentumScanner:
             2
         )
 
-        # Capital-aware position sizing
         if available_capital is None:
             position_capital = 2000
         else:
             position_capital = (
-                available_capital * DEFAULT_POSITION_SIZE
+                available_capital
+                * DEFAULT_POSITION_SIZE
             )
 
         shares_to_buy = (
@@ -133,26 +118,11 @@ class MomentumScanner:
             shares_to_buy * current_price, 2
         )
 
-        breakout = (
-            breakout_distance >= 0.95
-        )
-
-        trend_quality = (
-            current_price > ma20 > ma50
-        )
-
-        near_high = (
-            high_proximity >= 0.95
-        )
-
-        decent_volume = (
-            volume_ratio >= 1.2
-        )
-
-        overbought = (
-            rsi > 70
-        )
-
+        breakout = breakout_distance >= 0.95
+        trend_quality = current_price > ma20 > ma50
+        near_high = high_proximity >= 0.95
+        decent_volume = volume_ratio >= 1.2
+        overbought = rsi > 70
         untradeable = (
             shares_to_buy == 0
             or risk_pct > 6.0
@@ -160,7 +130,6 @@ class MomentumScanner:
 
         score = 0
 
-        # Momentum
         if momentum >= 0.50:
             score += 30
         elif momentum >= 0.30:
@@ -170,7 +139,6 @@ class MomentumScanner:
         elif momentum >= 0.05:
             score += 8
 
-        # Breakout
         if breakout_distance >= 0.99:
             score += 20
         elif breakout_distance >= 0.97:
@@ -178,13 +146,11 @@ class MomentumScanner:
         elif breakout_distance >= 0.95:
             score += 8
 
-        # Trend
         if trend_spread >= 0.10:
             score += 20
         elif trend_spread >= 0.05:
             score += 10
 
-        # High proximity
         if high_proximity >= 0.98:
             score += 20
         elif high_proximity >= 0.95:
@@ -192,7 +158,6 @@ class MomentumScanner:
         elif high_proximity >= 0.90:
             score += 8
 
-        # Volume
         if volume_ratio >= 2:
             score += 20
         elif volume_ratio >= 1.5:
@@ -200,7 +165,6 @@ class MomentumScanner:
         elif volume_ratio >= 1.2:
             score += 6
 
-        # RSI
         if 55 <= rsi <= 70:
             score += 15
         elif 45 <= rsi < 55:
@@ -209,6 +173,24 @@ class MomentumScanner:
             score -= 15
         elif rsi < 40:
             score -= 10
+
+        # GARCH — only for stocks worth evaluating
+        garch_vol = None
+        risk_adj_score = float(score)
+
+        if score >= MIN_SCORE_FOR_GARCH:
+            garch_vol = (
+                MarketIndicators.garch_volatility(
+                    candles
+                )
+            )
+
+            if garch_vol and garch_vol > 0:
+                # Penalise volatile stocks
+                # Higher vol → lower risk-adj score
+                risk_adj_score = round(
+                    score / (garch_vol + 1), 2
+                )
 
         if (
             score >= 85
@@ -232,6 +214,8 @@ class MomentumScanner:
             "momentum": round(momentum, 3),
             "rsi": round(rsi, 1),
             "atr": round(atr, 2),
+            "garch_vol": round(garch_vol, 3)
+            if garch_vol else None,
             "suggested_stop": suggested_stop,
             "target_price": target_price,
             "target_pct": target_pct,
@@ -239,10 +223,13 @@ class MomentumScanner:
             "risk_per_share": round(risk_per_share, 2),
             "shares_to_buy": shares_to_buy,
             "trade_value": trade_value,
-            "breakout_distance": round(breakout_distance, 3),
+            "breakout_distance": round(
+                breakout_distance, 3
+            ),
             "trend_spread": round(trend_spread, 3),
             "volume_ratio": round(volume_ratio, 2),
             "high_proximity": round(high_proximity, 3),
             "score": score,
+            "risk_adj_score": risk_adj_score,
             "tier": tier
         }

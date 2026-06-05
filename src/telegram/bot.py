@@ -442,6 +442,15 @@ async def run_scan(application, scan_type="morning"):
         and r["symbol"] not in sent_today
     ]
 
+    # Sort by risk-adjusted score (GARCH-weighted)
+    # Cleaner, less volatile stocks surface first
+    strong.sort(
+        key=lambda x: x.get(
+            "risk_adj_score", x["score"]
+        ),
+        reverse=True
+    )
+
     if not strong:
         best = (
             max(results, key=lambda x: x["score"])
