@@ -3,6 +3,9 @@ from src.indicators.market_indicators import (
 )
 from src.config.settings import (
     DEFAULT_POSITION_SIZE,
+    MAX_RISK_PER_TRADE_PERCENT,
+    MAX_RISK_PCT,
+    MIN_RISK_ADJ_SCORE,
     MIN_VIABLE_TRADE
 )
 
@@ -101,14 +104,26 @@ class MomentumScanner:
 
         if available_capital is None:
             position_capital = 2000
+            max_trade_risk = 2000 * MAX_RISK_PER_TRADE_PERCENT
         else:
             position_capital = (
                 available_capital
                 * DEFAULT_POSITION_SIZE
             )
+            max_trade_risk = (
+                available_capital
+                * MAX_RISK_PER_TRADE_PERCENT
+            )
+
+        capital_shares = int(position_capital / current_price)
+        risk_shares = (
+            int(max_trade_risk / risk_per_share)
+            if risk_per_share > 0
+            else 0
+        )
 
         shares_to_buy = (
-            int(position_capital / current_price)
+            min(capital_shares, risk_shares)
             if risk_per_share > 0
             and position_capital >= MIN_VIABLE_TRADE
             else 0
@@ -125,7 +140,7 @@ class MomentumScanner:
         overbought = rsi > 70
         untradeable = (
             shares_to_buy == 0
-            or risk_pct > 6.0
+            or risk_pct > MAX_RISK_PCT
         )
 
         score = 0
@@ -192,6 +207,27 @@ class MomentumScanner:
                     score / (garch_vol + 1), 2
                 )
 
+        risk_adjusted_enough = (
+            risk_adj_score >= MIN_RISK_ADJ_SCORE
+        )
+
+        rejection_reasons = []
+
+        if not breakout:
+            rejection_reasons.append("not_near_20d_high")
+        if not trend_quality:
+            rejection_reasons.append("weak_ma_trend")
+        if not near_high:
+            rejection_reasons.append("not_near_52w_high")
+        if not decent_volume:
+            rejection_reasons.append("volume_below_1_2x")
+        if overbought:
+            rejection_reasons.append("rsi_over_70")
+        if untradeable:
+            rejection_reasons.append("risk_or_size_untradeable")
+        if not risk_adjusted_enough:
+            rejection_reasons.append("low_risk_adjusted_score")
+
         if (
             score >= 85
             and breakout
@@ -200,6 +236,7 @@ class MomentumScanner:
             and decent_volume
             and not overbought
             and not untradeable
+            and risk_adjusted_enough
         ):
             tier = "STRONG"
 
@@ -231,5 +268,6 @@ class MomentumScanner:
             "high_proximity": round(high_proximity, 3),
             "score": score,
             "risk_adj_score": risk_adj_score,
+            "rejection_reasons": rejection_reasons,
             "tier": tier
         }

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text
 from sqlalchemy.orm import declarative_base
 from datetime import timezone, datetime
 
@@ -44,6 +44,16 @@ class Trade(Base):
 
     entry_reason = Column(
         String
+    )
+
+    entry_snapshot = Column(
+        Text,
+        nullable=True
+    )
+
+    net_pnl = Column(
+        Float,
+        nullable=True
     )
 
     exit_reason = Column(

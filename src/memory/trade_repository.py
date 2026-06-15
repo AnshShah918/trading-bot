@@ -1,3 +1,4 @@
+import json
 from datetime import timezone, datetime
 from src.memory.db import get_db
 from src.memory.models import Trade
@@ -8,9 +9,15 @@ def open_trade(
     entry_price,
     quantity,
     entry_reason="",
-    current_stop=None
+    current_stop=None,
+    entry_snapshot=None
 ):
     db = get_db()
+    snapshot_text = (
+        json.dumps(entry_snapshot, sort_keys=True)
+        if entry_snapshot
+        else None
+    )
 
     trade = Trade(
         symbol=symbol,
@@ -18,6 +25,7 @@ def open_trade(
         quantity=quantity,
         status="open",
         entry_reason=entry_reason,
+        entry_snapshot=snapshot_text,
         entry_time=datetime.now(timezone.utc),
         current_stop=current_stop,
         highest_price=entry_price,
@@ -94,6 +102,23 @@ def update_last_price(
 
     if trade:
         trade.last_known_price = last_known_price
+        db.commit()
+
+    db.close()
+
+
+def update_trade_net_pnl(
+    trade_id,
+    net_pnl
+):
+    db = get_db()
+
+    trade = db.query(Trade).filter(
+        Trade.id == trade_id
+    ).first()
+
+    if trade:
+        trade.net_pnl = net_pnl
         db.commit()
 
     db.close()

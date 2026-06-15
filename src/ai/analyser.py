@@ -7,9 +7,13 @@ from src.memory.trade_repository import (
     get_closed_trades,
     get_open_trades
 )
+from src.config.settings import (
+    MAX_AI_CALLS_PER_DAY,
+    MAX_RISK_PER_TRADE_PERCENT
+)
 
 AI_COST_FILE = "data/ai_costs.json"
-MAX_CALLS_PER_DAY = 50
+MAX_CALLS_PER_DAY = MAX_AI_CALLS_PER_DAY
 MAX_RETRIES = 2
 TIMEOUT_SECONDS = 15
 MAX_FAILURES_BEFORE_CIRCUIT_BREAK = 3
@@ -67,6 +71,27 @@ def build_trade_history():
     lines = []
 
     for t in trades[-20:]:
+        setup_bits = []
+        if t.entry_snapshot:
+            try:
+                snapshot = json.loads(t.entry_snapshot)
+                for key in (
+                    "score",
+                    "risk_adj_score",
+                    "ai_confidence",
+                    "rsi",
+                    "momentum",
+                    "volume_ratio",
+                    "risk_pct",
+                    "garch_vol"
+                ):
+                    if snapshot.get(key) is not None:
+                        setup_bits.append(
+                            f"{key}={snapshot[key]}"
+                        )
+            except Exception:
+                setup_bits = []
+
         hold_days = (
             (t.exit_time - t.entry_time).days
             if t.exit_time and t.entry_time
@@ -78,9 +103,10 @@ def build_trade_history():
         )
         lines.append(
             f"{t.symbol}: {outcome} "
-            f"₹{round(t.pnl or 0, 0)} "
+            f"₹{round(t.net_pnl if t.net_pnl is not None else t.pnl or 0, 0)} "
             f"in {hold_days}d — "
             f"{t.entry_reason or ''} — "
+            f"{', '.join(setup_bits)} — "
             f"exit: {t.exit_reason or ''}"
         )
 
@@ -307,10 +333,26 @@ If no good trades: return empty array []"""
                 rec.get("allocation_inr")
                 and setup["current_price"] > 0
             ):
-                setup["shares_to_buy"] = int(
+                allocation_shares = int(
                     rec["allocation_inr"]
                     /
                     setup["current_price"]
+                )
+                risk_budget = (
+                    available_capital
+                    * MAX_RISK_PER_TRADE_PERCENT
+                )
+                risk_per_share = setup.get(
+                    "risk_per_share", 0
+                )
+                risk_shares = (
+                    int(risk_budget / risk_per_share)
+                    if risk_per_share > 0
+                    else 0
+                )
+                setup["shares_to_buy"] = min(
+                    allocation_shares,
+                    risk_shares
                 )
                 setup["trade_value"] = round(
                     setup["shares_to_buy"]

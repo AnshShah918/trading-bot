@@ -1,6 +1,7 @@
 from src.memory.trade_repository import (
     open_trade,
-    close_trade
+    close_trade,
+    update_trade_net_pnl
 )
 from src.portfolio.risk_manager import RiskManager
 from src.portfolio.portfolio_manager import PortfolioManager
@@ -20,14 +21,16 @@ class PaperEngine:
         quantity,
         entry_reason,
         atr,
-        current_stop=None
+        current_stop=None,
+        entry_snapshot=None
     ):
         trade = open_trade(
             symbol=symbol,
             entry_price=entry_price,
             quantity=quantity,
             entry_reason=entry_reason,
-            current_stop=current_stop
+            current_stop=current_stop,
+            entry_snapshot=entry_snapshot
         )
 
         rm = RiskManager(
@@ -69,6 +72,11 @@ class PaperEngine:
             self.portfolio.apply_trade_result(
                 costs["net_pnl"]
             )
+        )
+
+        update_trade_net_pnl(
+            trade.id,
+            costs["net_pnl"]
         )
 
         if trade_id in self.active_trades:

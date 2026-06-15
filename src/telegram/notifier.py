@@ -14,6 +14,12 @@ def format_setup(result):
     else:
         ai_line = ""
 
+    garch_line = (
+        f"GARCH vol: {result['garch_vol']}%\n"
+        if result.get("garch_vol")
+        else ""
+    )
+
     return (
         f"🟢 *{result['symbol']}*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -21,7 +27,7 @@ def format_setup(result):
         f"RSI:      {result['rsi']}\n"
         f"Momentum: {result['momentum']}\n"
         f"Volume:   {result['volume_ratio']}x avg\n"
-        f"GARCH vol: {result['garch_vol']}%\n" if result.get('garch_vol') else ""
+        f"{garch_line}"
         f"{ai_line}"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Entry:    ₹{result['current_price']}\n"

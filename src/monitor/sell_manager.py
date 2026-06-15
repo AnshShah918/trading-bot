@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime
 from kiteconnect import KiteConnect
 from dotenv import load_dotenv
+from src.portfolio.portfolio_manager import PortfolioManager
 
 load_dotenv()
 
@@ -12,6 +13,7 @@ REPRICE_WAIT_SECONDS = 30
 # Sells queued for next market open
 # {trade_id: {symbol, quantity, reason}}
 _queued_sells = {}
+portfolio = PortfolioManager()
 
 
 def get_kite():
@@ -414,7 +416,8 @@ async def process_queued_sells(bot):
 
         async def on_success(order_id, price, qty):
             from src.memory.trade_repository import (
-                close_trade
+                close_trade,
+                update_trade_net_pnl
             )
             from src.utils.cost_calculator import (
                 calculate_trade_costs
@@ -429,6 +432,10 @@ async def process_queued_sells(bot):
                 closed.pnl
             )
             portfolio.apply_trade_result(
+                costs["net_pnl"]
+            )
+            update_trade_net_pnl(
+                closed.id,
                 costs["net_pnl"]
             )
             await bot.send_message(

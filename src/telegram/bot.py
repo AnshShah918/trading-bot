@@ -19,7 +19,13 @@ from src.ai.analyser import analyse_setups, get_cost_summary
 from src.utils.trading_calendar import is_trading_day
 from src.config.settings import (
     MAX_OPEN_TRADES,
+    MAX_RISK_PER_TRADE_PERCENT,
     MIN_VIABLE_TRADE,
+    CUSTOM_SYMBOLS,
+    FALLBACK_WATCH_SCORE,
+    RECOVERY_MIN_AI_CONFIDENCE,
+    RECOVERY_MIN_SCORE,
+    RECOVERY_RISK_PER_TRADE_PERCENT,
     RESERVE_PERCENT,
     TOP_N_TO_AI,
     MAX_AI_PICKS,
@@ -40,6 +46,36 @@ pending_setups = {}
 sent_today = set()
 token_map = {}
 fired_today = set()
+
+
+def build_entry_snapshot(setup):
+    keys = (
+        "score",
+        "risk_adj_score",
+        "ai_confidence",
+        "ai_reasoning",
+        "momentum",
+        "rsi",
+        "atr",
+        "garch_vol",
+        "volume_ratio",
+        "risk_pct",
+        "risk_per_share",
+        "breakout_distance",
+        "trend_spread",
+        "high_proximity",
+        "target_price",
+        "target_pct",
+        "suggested_stop",
+        "current_price",
+        "shares_to_buy",
+        "trade_value"
+    )
+    return {
+        key: setup.get(key)
+        for key in keys
+        if key in setup
+    }
 
 
 def get_capital_status():
@@ -177,7 +213,10 @@ async def handle_decision(
                             f"order_id={order_id}"
                         ),
                         atr=setup["atr"],
-                        current_stop=setup["suggested_stop"]
+                        current_stop=setup["suggested_stop"],
+                        entry_snapshot=build_entry_snapshot(
+                            setup
+                        )
                     )
 
                     await query.edit_message_text(
@@ -239,7 +278,8 @@ async def handle_decision(
                     f"ai={setup.get('ai_confidence', 'N/A')}"
                 ),
                 atr=setup["atr"],
-                current_stop=setup["suggested_stop"]
+                current_stop=setup["suggested_stop"],
+                entry_snapshot=build_entry_snapshot(setup)
             )
 
             await query.edit_message_text(
@@ -333,7 +373,10 @@ async def run_scan(application, scan_type="morning"):
     instruments = kite.instruments("NSE")
     token_map = InstrumentLookup.build_map(instruments)
     application.bot_data["token_map"] = token_map
-    watchlist = Nifty500.load()
+    watchlist = list(dict.fromkeys(
+        Nifty500.load()
+        + CUSTOM_SYMBOLS
+    ))
     scanner = MomentumScanner()
 
     to_date = datetime.now()
@@ -394,8 +437,21 @@ async def run_scan(application, scan_type="morning"):
                     pos_capital = (
                         cap["available"] * 0.25
                     )
-                    result["shares_to_buy"] = int(
+                    risk_budget = (
+                        cap["available"]
+                        * MAX_RISK_PER_TRADE_PERCENT
+                    )
+                    risk_shares = (
+                        int(risk_budget / risk)
+                        if risk > 0
+                        else 0
+                    )
+                    capital_shares = int(
                         pos_capital / live_price
+                    )
+                    result["shares_to_buy"] = min(
+                        capital_shares,
+                        risk_shares
                     )
                     result["trade_value"] = round(
                         result["shares_to_buy"]
@@ -451,47 +507,135 @@ async def run_scan(application, scan_type="morning"):
         reverse=True
     )
 
-    if not strong:
+    in_recovery = (
+        paper.portfolio.current_capital
+        < paper.portfolio.base_capital
+    )
+
+    if in_recovery:
+        strong = [
+            r for r in strong
+            if r["score"] >= RECOVERY_MIN_SCORE
+        ]
+
+    watch_candidates = [
+        r for r in results
+        if r["tier"] == "WATCH"
+        and r["score"] >= FALLBACK_WATCH_SCORE
+        and r["symbol"] not in sent_today
+    ]
+    watch_candidates.sort(
+        key=lambda x: x.get(
+            "risk_adj_score", x["score"]
+        ),
+        reverse=True
+    )
+
+    use_ai_review = False
+
+    if strong:
+        top_n = strong[:TOP_N_TO_AI]
+        candidate_label = "STRONG"
+        use_ai_review = True
+    else:
+        top_n = watch_candidates[:TOP_N_TO_AI]
+        candidate_label = "WATCH"
+
+    if not top_n:
         best = (
             max(results, key=lambda x: x["score"])
             if results else None
         )
         best_note = (
             f"Best score: {best['score']} "
-            f"({best['symbol']})"
+            f"({best['symbol']})\n"
+            f"Reasons: {', '.join(best.get('rejection_reasons', []))}"
             if best else ""
         )
         await send_message(
             bot,
             f"{label} scan done.\n"
-            f"❌ Scanner: No STRONG setups.\n"
+            f"❌ Scanner: No tradeable setups.\n"
             f"{best_note}"
         )
         return
 
-    top_n = strong[:TOP_N_TO_AI]
+    max_picks = min(MAX_AI_PICKS, slots)
 
-    await send_message(
-        bot,
-        f"🤖 AI reviewing {len(top_n)} setups "
-        f"(max {min(MAX_AI_PICKS, slots)} picks)..."
-    )
+    if use_ai_review:
+        await send_message(
+            bot,
+            f"🤖 AI reviewing {len(top_n)} {candidate_label} setup(s) "
+            f"(max {max_picks} picks)..."
+        )
 
-    analysed = analyse_setups(
-        setups=top_n,
-        available_capital=cap["available"],
-        max_picks=min(MAX_AI_PICKS, slots)
-    )
+        analysed = analyse_setups(
+            setups=top_n,
+            available_capital=cap["available"],
+            max_picks=max_picks
+        )
+    else:
+        await send_message(
+            bot,
+            f"📊 No STRONG setups. Reviewing top "
+            f"{len(top_n)} WATCH setup(s) without AI."
+        )
+        analysed = top_n[:max_picks]
+
+    if in_recovery:
+        if use_ai_review:
+            analysed = [
+                setup for setup in analysed
+                if (
+                    setup.get("ai_confidence") or 0
+                ) >= RECOVERY_MIN_AI_CONFIDENCE
+            ]
+
+        recovery_risk_budget = (
+            cap["available"]
+            * RECOVERY_RISK_PER_TRADE_PERCENT
+        )
+
+        for setup in analysed:
+            risk_per_share = setup.get(
+                "risk_per_share", 0
+            )
+            if risk_per_share > 0:
+                risk_shares = int(
+                    recovery_risk_budget
+                    / risk_per_share
+                )
+                setup["shares_to_buy"] = min(
+                    setup["shares_to_buy"],
+                    risk_shares
+                )
+                setup["trade_value"] = round(
+                    setup["shares_to_buy"]
+                    * setup["current_price"],
+                    2
+                )
+
+        analysed = [
+            setup for setup in analysed
+            if setup["shares_to_buy"] > 0
+        ]
 
     if not analysed:
         symbols = [s["symbol"] for s in top_n]
-        await send_message(
-            bot,
-            f"🤖 AI reviewed: {', '.join(symbols)}\n"
-            f"❌ AI: None met conviction threshold.\n"
-            f"Scanner: {len(strong)} STRONG found\n"
-            f"but AI rejected all."
-        )
+        if use_ai_review:
+            await send_message(
+                bot,
+                f"🤖 AI reviewed: {', '.join(symbols)}\n"
+                f"❌ AI: None met conviction threshold.\n"
+                f"Scanner: {len(strong)} STRONG found\n"
+                f"but AI rejected all."
+            )
+        else:
+            await send_message(
+                bot,
+                f"📊 WATCH reviewed: {', '.join(symbols)}\n"
+                f"❌ No scanner-only setup met sizing rules."
+            )
         return
 
     costs = get_cost_summary()

@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import (
     ContextTypes,
@@ -8,7 +9,8 @@ from telegram.ext import (
 from src.memory.trade_repository import (
     get_open_trades,
     get_closed_trades,
-    close_trade
+    close_trade,
+    update_trade_net_pnl
 )
 from src.portfolio.portfolio_manager import PortfolioManager
 from src.utils.cost_calculator import calculate_trade_costs
@@ -143,7 +145,13 @@ async def cmd_portfolio(
     open_trades = get_open_trades()
 
     total_realised = sum(
-        t.pnl for t in closed if t.pnl
+        (
+            t.net_pnl
+            if t.net_pnl is not None
+            else t.pnl
+        )
+        for t in closed
+        if t.pnl is not None
     )
 
     total_unrealised = sum(
@@ -254,6 +262,13 @@ async def cmd_close(
         trade.exit_price * trade.quantity,
         trade.pnl
     )
+    portfolio.apply_trade_result(
+        costs["net_pnl"]
+    )
+    update_trade_net_pnl(
+        trade.id,
+        costs["net_pnl"]
+    )
 
     hold_days = (
         trade.exit_time - trade.entry_time
@@ -324,6 +339,13 @@ async def cmd_confirm(
         trade.entry_price * trade.quantity,
         exit_price * trade.quantity,
         trade.pnl
+    )
+    portfolio.apply_trade_result(
+        costs["net_pnl"]
+    )
+    update_trade_net_pnl(
+        trade.id,
+        costs["net_pnl"]
     )
 
     await update.message.reply_text(
@@ -443,6 +465,102 @@ async def cmd_news(
     )
 
 
+async def cmd_why(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "Usage: /why <symbol>\n"
+            "Example: /why BELRISE"
+        )
+        return
+
+    symbol = args[0].upper()
+
+    await update.message.reply_text(
+        f"Checking {symbol}..."
+    )
+
+    try:
+        from kiteconnect import KiteConnect
+        from src.universe.instrument_lookup import (
+            InstrumentLookup
+        )
+        from src.scanner.momentum_scanner import (
+            MomentumScanner
+        )
+
+        kite = KiteConnect(
+            api_key=os.getenv("KITE_API_KEY")
+        )
+        kite.set_access_token(
+            os.getenv("KITE_ACCESS_TOKEN")
+        )
+
+        instruments = kite.instruments("NSE")
+        token_map = InstrumentLookup.build_map(
+            instruments
+        )
+        token = token_map.get(symbol)
+
+        if not token:
+            await update.message.reply_text(
+                f"{symbol} not found in Kite NSE instruments."
+            )
+            return
+
+        to_date = datetime.now()
+        from_date = to_date - timedelta(days=365)
+        candles = kite.historical_data(
+            instrument_token=token,
+            from_date=from_date,
+            to_date=to_date,
+            interval="day"
+        )
+
+        if not candles:
+            await update.message.reply_text(
+                f"No daily candle data found for {symbol}."
+            )
+            return
+
+        setup = MomentumScanner().scan(
+            symbol=symbol,
+            candles=candles,
+            available_capital=portfolio.current_capital
+        )
+
+        reasons = setup.get(
+            "rejection_reasons", []
+        )
+        reason_text = (
+            ", ".join(reasons)
+            if reasons else "none"
+        )
+
+        await update.message.reply_text(
+            f"*{symbol} Scanner Check*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Tier: {setup['tier']}\n"
+            f"Score: {setup['score']}\n"
+            f"Risk-adj: {setup['risk_adj_score']}\n"
+            f"RSI: {setup['rsi']}\n"
+            f"Momentum: {setup['momentum']}\n"
+            f"Volume: {setup['volume_ratio']}x\n"
+            f"Risk: {setup['risk_pct']}%\n"
+            f"Reasons: {reason_text}",
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"Could not check {symbol}: {e}"
+        )
+
+
 def register_commands(app):
     app.add_handler(
         CommandHandler("help", cmd_help)
@@ -470,4 +588,7 @@ def register_commands(app):
     )
     app.add_handler(
         CommandHandler("news", cmd_news)
+    )
+    app.add_handler(
+        CommandHandler("why", cmd_why)
     )

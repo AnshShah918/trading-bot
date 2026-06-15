@@ -8,7 +8,8 @@ from src.memory.trade_repository import (
     get_open_trades,
     close_trade,
     update_trade_stop,
-    update_last_price
+    update_last_price,
+    update_trade_net_pnl
 )
 from src.portfolio.risk_manager import RiskManager
 from src.portfolio.portfolio_manager import PortfolioManager
@@ -300,6 +301,10 @@ async def monitor_once(bot, token_map):
                         portfolio.apply_trade_result(
                             costs["net_pnl"]
                         )
+                        update_trade_net_pnl(
+                            closed.id,
+                            costs["net_pnl"]
+                        )
                         await bot.send_message(
                             chat_id=os.getenv(
                                 "TELEGRAM_CHAT_ID"
@@ -348,6 +353,10 @@ async def monitor_once(bot, token_map):
                         closed.pnl
                     )
                     portfolio.apply_trade_result(
+                        costs["net_pnl"]
+                    )
+                    update_trade_net_pnl(
+                        closed.id,
                         costs["net_pnl"]
                     )
                     await bot.send_message(
@@ -425,6 +434,10 @@ async def monitor_once(bot, token_map):
                             portfolio.apply_trade_result(
                                 costs["net_pnl"]
                             )
+                            update_trade_net_pnl(
+                                closed.id,
+                                costs["net_pnl"]
+                            )
                             await bot.send_message(
                                 chat_id=os.getenv(
                                     "TELEGRAM_CHAT_ID"
@@ -474,6 +487,10 @@ async def monitor_once(bot, token_map):
                             closed.pnl
                         )
                         portfolio.apply_trade_result(
+                            costs["net_pnl"]
+                        )
+                        update_trade_net_pnl(
+                            closed.id,
                             costs["net_pnl"]
                         )
                         await bot.send_message(
